@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -15,10 +16,10 @@ import (
 type AgentEngine struct {
 	provider provider.LLMProvider
 	registry tools.Registry
-
 	// WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
 	WorkDir        string
 	EnableThinking bool // 慢思考模式开关
+	composer *ctxpkg.PromptComposer // 【新增】引擎持有 Composer 实例
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -27,25 +28,21 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		registry:       r,
 		WorkDir:        workDir,
 		EnableThinking: enableThinking,
+		composer: ctxpkg.NewPromptComposer(workDir), // 初始化组装器
 	}
 }
 
 // Run 启动 Agent 的生命周期
 func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
-	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
-	// 1. 初始化会话的 Context (上下文内存)
+	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！ 
+	systemMsg := e.composer.Build()
+
 	contextHistory := []schema.Message{
-		{
-			Role:    schema.RoleSystem,
-			Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-		},
-		{
-			Role:    schema.RoleUser,
-			Content: userPrompt,
-		},
-	}
+        systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
+        {Role: schema.RoleUser, Content: userPrompt},
+    }
 
 	turnCount := 0
 
@@ -133,7 +130,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
                     // 【触发 Reporter】: 汇报工具物理执行的结果
                     reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
                 }
-				
+
                 // 将执行结果封装为一条用户消息 (RoleUser)
                 obsMsg := schema.Message{
                     Role:       schema.RoleUser,
