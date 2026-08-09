@@ -31,7 +31,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
+func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
@@ -61,6 +61,10 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
 		// ====================================================================
 		if e.EnableThinking {
+			if reporter != nil {
+				// 【触发 Reporter】: 开始慢思考
+				reporter.OnThinking(ctx)
+			}
 			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
 			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
 			if err != nil {
@@ -85,9 +89,10 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 		// // 将模型的响应完整追加到上下文历史中
 		contextHistory = append(contextHistory, *actionResp)
-		if actionResp.Content != "" {
-			fmt.Printf("🤖 [对外回复]: \n%s\n", actionResp.Content)
-		}
+		if actionResp.Content != "" && reporter != nil {
+            // 【触发 Reporter】: 输出阶段性总结或最终回复
+            reporter.OnMessage(ctx, actionResp.Content)
+        }
 
 		if len(actionResp.ToolCalls) == 0 {
 			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
@@ -111,13 +116,24 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
             go func(idx int, call schema.ToolCall) {
                 defer wg.Done() // 协程结束时计数器减一
                 log.Printf("  -> [Go-%d] 🛠️ 触发并行执行: %s\n", idx, call.Name)
+				if reporter != nil {
+                    // 【触发 Reporter】: 报告即将在底层执行的工具
+                    reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
+                }
                 // 调用底层 Registry 执行工具（物理操作）
                 result := e.registry.Execute(ctx, call)
-                if result.IsError {
-                    log.Printf("  -> [Go-%d] ❌ 工具执行报错: %s\n", idx, result.Output)
-                } else {
-                    log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
+
+                if reporter != nil {
+                    // 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
+                    // 注意：传递给大模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 是缩略版
+                    displayOutput := result.Output
+                    if len(displayOutput) > 200 {
+                        displayOutput = displayOutput[:200] + "... (已截断)"
+                    }
+                    // 【触发 Reporter】: 汇报工具物理执行的结果
+                    reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
                 }
+				
                 // 将执行结果封装为一条用户消息 (RoleUser)
                 obsMsg := schema.Message{
                     Role:       schema.RoleUser,
