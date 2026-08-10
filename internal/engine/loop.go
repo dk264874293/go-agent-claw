@@ -12,47 +12,44 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
-// AgentEngine 是微型 OS 的核心驱动
+
 type AgentEngine struct {
-	provider provider.LLMProvider
-	registry tools.Registry
-	// WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	WorkDir        string
-	EnableThinking bool // 慢思考模式开关
-	composer *ctxpkg.PromptComposer // 【新增】引擎持有 Composer 实例
+    provider       provider.LLMProvider
+    registry       tools.Registry
+    EnableThinking bool
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
-	return &AgentEngine{
-		provider:       p,
-		registry:       r,
-		WorkDir:        workDir,
-		EnableThinking: enableThinking,
-		composer: ctxpkg.NewPromptComposer(workDir), // 初始化组装器
-	}
+// 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
+    return &AgentEngine{
+        provider:       p,
+        registry:       r,
+        EnableThinking: enableThinking,
+    }
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
-	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
+func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Reporter) error {
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
+
+	// 根据当前 Session 的工作区，动态组装最新的 System Prompt
+    composer := ctxpkg.NewPromptComposer(session.WorkDir)
 
 	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！ 
-	systemMsg := e.composer.Build()
-
-	contextHistory := []schema.Message{
-        systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
-        {Role: schema.RoleUser, Content: userPrompt},
-    }
-
-	turnCount := 0
+	systemMsg := composer.Build()
 
 	// 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
 	for {
-		turnCount++
-		log.Printf("========== [Turn %d] 开始 ==========\n", turnCount)
-
 		// 获取当前挂载的所有工具定义
 		availableTools := e.registry.GetAvailableTools()
+
+		// 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory
+        // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
+        workingMemory := session.GetWorkingMemory(6)
+
+		var contextHistory []schema.Message
+        contextHistory = append(contextHistory, systemMsg)
+        contextHistory = append(contextHistory, workingMemory...)
 
 		// ====================================================================
 		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
@@ -62,29 +59,26 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 				// 【触发 Reporter】: 开始慢思考
 				reporter.OnThinking(ctx)
 			}
-			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
 			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
-				fmt.Printf("🧠 [内部思考 Trace]: %s\n", thinkResp.Content)
-				contextHistory = append(contextHistory, *thinkResp)
+				// 将思考过程持久化到 Session 中！
+                session.Append(*thinkResp)
+                // 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
+                contextHistory = append(contextHistory, *thinkResp)
 			}
 		}
-
-		// ====================================================================
-		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
-		// ====================================================================
-		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
-		// 此时的 contextHistory 中已经包含了上一阶段模型自己的 Thinking Trace。 
+ 
 		// 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
 		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
-
-		// // 将模型的响应完整追加到上下文历史中
+		// 将大模型的行动响应持久化到 Session 中 
+		session.Append(*actionResp)
+		// 将模型的响应完整追加到上下文历史中
 		contextHistory = append(contextHistory, *actionResp)
 		if actionResp.Content != "" && reporter != nil {
             // 【触发 Reporter】: 输出阶段性总结或最终回复
@@ -96,17 +90,11 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 			break
 		}
 
-
-		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionResp.ToolCalls))
-
-		// 1. 预分配一个固定长度的切片，用于安全地存放各个并发工具的执行结果（Observation）
-        // 长度与 ToolCalls 的数量完全一致
+		//  ================= 并发执行底层工具 =================
         observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
-
-		// 2. 声明 WaitGroup 用于阻塞等待所有协程完成
         var wg sync.WaitGroup
 
-		// 3. 遍历模型请求的所有工具，为每一个工具单独 Fork 出一个 Goroutine
+
         for i, toolCall := range actionResp.ToolCalls {
             wg.Add(1) // 增加计数器
             // 开启协程。注意：一定要将索引 i 和 toolCall 作为参数传入匿名函数，防止闭包变量捕获陷阱！
@@ -146,15 +134,8 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
         wg.Wait()
 		log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
-
-
-		// 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
-        // 这等价于 contextHistory = append(contextHistory, observationMsgs...)
-        for _, obs := range observationMsgs {
-            contextHistory = append(contextHistory, obs)
-        }
-
-		
+		// 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
+        session.Append(observationMsgs...)		
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
