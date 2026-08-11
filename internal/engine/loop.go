@@ -17,6 +17,8 @@ type AgentEngine struct {
     provider       provider.LLMProvider
     registry       tools.Registry
     EnableThinking bool
+	composer  *ctxpkg.PromptComposer
+	compactor *ctxpkg.Compactor // 【新增】压缩器实例
 }
 
 // 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
@@ -25,6 +27,9 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
         provider:       p,
         registry:       r,
         EnableThinking: enableThinking,
+		composer: 		ctxpkg.NewPromptComposer("."),
+        // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
+        compactor:      ctxpkg.NewCompactor(3000, 6),
     }
 }
 
@@ -32,11 +37,9 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Reporter) error {
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
-	// 根据当前 Session 的工作区，动态组装最新的 System Prompt
-    composer := ctxpkg.NewPromptComposer(session.WorkDir)
-
-	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！ 
-	systemMsg := composer.Build()
+	// 根据当前 Session 的工作区，动态组装最新的 System Prompt、
+	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
+    systemMsg := e.composer.Build()
 
 	// 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
 	for {
@@ -45,11 +48,15 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 
 		// 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory
         // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
-        workingMemory := session.GetWorkingMemory(6)
+        workingMemory := session.GetWorkingMemory(20)
 
 		var contextHistory []schema.Message
         contextHistory = append(contextHistory, systemMsg)
         contextHistory = append(contextHistory, workingMemory...)
+		
+		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
+        // 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+        compactedContext := e.compactor.Compact(contextHistory)
 
 		// ====================================================================
 		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
@@ -59,7 +66,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				// 【触发 Reporter】: 开始慢思考
 				reporter.OnThinking(ctx)
 			}
-			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
@@ -67,19 +74,19 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				// 将思考过程持久化到 Session 中！
                 session.Append(*thinkResp)
                 // 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
-                contextHistory = append(contextHistory, *thinkResp)
+                compactedContext = append(compactedContext, *thinkResp)
 			}
 		}
  
 		// 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
-		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
 		// 将大模型的行动响应持久化到 Session 中 
 		session.Append(*actionResp)
 		// 将模型的响应完整追加到上下文历史中
-		contextHistory = append(contextHistory, *actionResp)
+		compactedContext = append(compactedContext, *actionResp)
 		if actionResp.Content != "" && reporter != nil {
             // 【触发 Reporter】: 输出阶段性总结或最终回复
             reporter.OnMessage(ctx, actionResp.Content)
