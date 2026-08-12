@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+    "flag"
+    "fmt"
     "log"
     "os"
     // "sync"
@@ -21,6 +23,13 @@ func main() {
 	// 加载 .env 文件
 	godotenv.Load()
 
+    promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+    flag.Parse()
+    if *promptPtr == "" {
+        fmt.Println("用法: go run cmd/claw/main.go -prompt \"你的任务指令\"")
+        os.Exit(1)
+    }
+
 	// 确保已设置 ZHIPU_API_KEY
     if os.Getenv("ZHIPU_API_KEY") == "" {
         log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
@@ -28,7 +37,7 @@ func main() {
 
 	// 1. 获取工作区物理边界
     workDir, _ := os.Getwd()
-
+    workDir += "/workspace"
 	// 2. 初始化LLM
     llmProvider := provider.NewZhipuOpenAIProvider("glm-4.7")
 
@@ -37,22 +46,18 @@ func main() {
 	registry.Register(tools.NewReadFileTool(workDir))
     registry.Register(tools.NewWriteFileTool(workDir))
     registry.Register(tools.NewBashTool(workDir))
+    registry.Register(tools.NewEditFileTool(workDir))
 
 	// 引擎本身变成无状态的，它不绑定 WorkDir（仅适用于本讲演示）
-    eng := engine.NewAgentEngine(llmProvider, registry, false) 
+    eng := engine.NewAgentEngine(llmProvider, registry, false,true) 
     reporter := engine.NewTerminalReporter()
 
-	sessionID := "test_oom_protection_001"
+	sessionID := "task_web_server_01"
     sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 	// 发起一个会导致读取大文件的恶意任务
-    prompt := `
-    请帮我执行以下三个步骤：
-    1. 使用 bash 执行 echo "开始排查日志"
-    2. 使用 read_file 工具读取当前目录下的巨大文件 mock_log.txt
-    3. 使用 bash 执行 date 命令获取当前时间，并告诉我任务全部完成。
-    `
+    log.Printf("\n>>> 🚀 收到指令: %s\n", *promptPtr)
 
-	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+	sess.Append(schema.Message{Role: schema.RoleUser, Content: *promptPtr})
 
 	err := eng.Run(context.Background(), sess, reporter)
     if err != nil {

@@ -17,17 +17,17 @@ type AgentEngine struct {
     provider       provider.LLMProvider
     registry       tools.Registry
     EnableThinking bool
-	composer  *ctxpkg.PromptComposer
+	PlanMode       bool // 【新增】暴露给外部的计划模式开关
 	compactor *ctxpkg.Compactor // 【新增】压缩器实例
 }
 
 // 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool,planMode bool) *AgentEngine {
     return &AgentEngine{
         provider:       p,
         registry:       r,
         EnableThinking: enableThinking,
-		composer: 		ctxpkg.NewPromptComposer("."),
+		PlanMode:       planMode,
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
         compactor:      ctxpkg.NewCompactor(3000, 6),
     }
@@ -38,8 +38,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 根据当前 Session 的工作区，动态组装最新的 System Prompt、
-	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
-    systemMsg := e.composer.Build()
+	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
+    systemMsg := composer.Build()
 
 	// 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
 	for {
