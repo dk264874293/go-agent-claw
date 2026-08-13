@@ -2,7 +2,7 @@
  * @Author: 汪培良 rick_wang@yunquna.com
  * @Date: 2026-08-08 11:32:10
  * @LastEditors: 汪培良 rick_wang@yunquna.com
- * @LastEditTime: 2026-08-09 09:56:37
+ * @LastEditTime: 2026-08-13 15:49:14
  * @FilePath: /go-agent-claw/internal/tools/registry.go
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -12,8 +12,13 @@ import (
     "encoding/json"
     "fmt"
     "log"
+    
     "github.com/dk264874293/go-agent-claw/internal/schema"
 )
+
+// MiddlewareFunc 定义了中间件的签名。
+// 它接收当前的 ToolCall，并返回一个是否允许执行的布尔值 (allowed)，以及拦截时的原因 (rejectReason)。
+type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string)
 
 // BaseTool 是所有具体工具必须实现的通用接口
 type BaseTool interface {
@@ -32,6 +37,7 @@ type BaseTool interface {
 type Registry interface {
     // Register 挂载一个新的工具到系统中
     Register(tool BaseTool)
+    Use(mw MiddlewareFunc)
     // GetAvailableTools 返回当前系统挂载的所有可用工具的 Schema
     GetAvailableTools() []schema.ToolDefinition
 
@@ -43,12 +49,18 @@ type Registry interface {
 type registryImpl struct {
     // 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
     tools map[string]BaseTool 
+    middlewares []MiddlewareFunc
 }
 
 func NewRegistry() Registry {
     return &registryImpl{
         tools: make(map[string]BaseTool),
+        middlewares: make([]MiddlewareFunc, 0),
     }
+}
+
+func (r *registryImpl) Use(mw MiddlewareFunc) {
+    r.middlewares = append(r.middlewares, mw)
 }
 
 func (r *registryImpl) Register(tool BaseTool) {
@@ -79,9 +91,22 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
             IsError:    true, // 标记为错误，模型看到后会尝试纠正
         }
     }
-    // 2. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
+
+    // 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+    for _, mw := range r.middlewares {
+        allowed, reason := mw(ctx, call)
+        if !allowed {
+            log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
+            return schema.ToolResult{
+                ToolCallID: call.ID,
+                Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
+                IsError:    true, // 必须返回 Error，强制大模型阅读拒绝理由
+            }
+        }
+    }
+    // 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
     output, err := tool.Execute(ctx, call.Arguments)
-    // 3. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+    // 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
     if err != nil {
         errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
         return schema.ToolResult{
