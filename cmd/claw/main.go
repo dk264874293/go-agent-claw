@@ -9,7 +9,7 @@ import (
     // "sync"
     // "time"
 
-	ctxpkg "github.com/dk264874293/go-agent-claw/internal/engine"
+	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	// "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	// "github.com/dk264874293/go-agent-claw/internal/feishu"
@@ -52,27 +52,20 @@ func main() {
     eng := engine.NewAgentEngine(llmProvider, registry, false,false) 
     reporter := engine.NewTerminalReporter()
 
-	sessionID := "test_recovery_001"
+	sessionID := "test_doom_loop_001"
     sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 	// 发起一个会导致读取大文件的恶意任务
     // log.Printf("\n>>> 🚀 收到指令: %s\n", *promptPtr)
     prompt := `
-	我当前目录下有一个 auth.go 文件。
-	请修改 auth.go 中的 login 函数。
-	请直接使用 edit_file 工具替换下面的代码块，将判断条件改为同时允许"admin"、"root"和"guest"三种用户登录：
-
-    // 鉴权入口函数
-    func login(user string) bool {
-        // 检查用户名
-        if user == "admin" {
-            return true
-        }
-        return false
-    }
-`
+    帮我读取当前目录下的 secret_key.txt。
+    注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
+    如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
+    `
 
 
 	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+
+    log.Println("\n>>> 🚀 启动死循环干预测试...")
 
 	err := eng.Run(context.Background(), sess, reporter)
     if err != nil {

@@ -18,9 +18,10 @@ type AgentEngine struct {
     provider       provider.LLMProvider
     registry       tools.Registry
     EnableThinking bool
-	PlanMode       bool // 【新增】暴露给外部的计划模式开关
-	compactor *ctxpkg.Compactor // 【新增】压缩器实例
-	recovery *ctxpkg.RecoveryManager // 【新增】自愈管理器}
+	PlanMode       bool // 暴露给外部的计划模式开关
+	compactor *ctxpkg.Compactor // 压缩器实例
+	recovery *ctxpkg.RecoveryManager // 自愈管理器
+	injector *ReminderInjector // 提醒注入器
 }
 
 // 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
@@ -33,11 +34,12 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
         compactor:      ctxpkg.NewCompactor(300000, 10),
 		recovery: 		ctxpkg.NewRecoveryManager(), // 初始化 Recovery }
+		injector: 		NewReminderInjector(), // 【初始化注入器】
     }
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Reporter) error {
+func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
 	// 根据当前 Session 的工作区，动态组装最新的 System Prompt、
@@ -112,6 +114,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
         observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
         var wg sync.WaitGroup
 
+		// 用于收集本轮执行的最后一个工具，供 Reminder 探测器分析
+        // (在真实的工业级架构中，如果并发调用了多个工具，我们可以逐个分析或仅分析报错的那个。这里简化为取第一个)
+        var lastToolCall schema.ToolCall
+        var lastToolResult schema.ToolResult
+
 
         for i, toolCall := range actionResp.ToolCalls {
             wg.Add(1) // 增加计数器
@@ -156,6 +163,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
                 // 【线程安全】: 由于每个 Goroutine 操作的是预分配切片的不同索引，
                 // 这里不需要加锁 (Mutex)，性能极高！
                 observationMsgs[idx] = obsMsg
+
+				if idx == 0 { 
+					lastToolCall = call 
+					lastToolResult = result 
+				}
             }(i, toolCall) // 闭包传参
         }
 
@@ -163,7 +175,15 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
         wg.Wait()
 		log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
 		// 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
-        session.Append(observationMsgs...)		
+		// 1. 先将普通的工具执行结果存入 Session
+        session.Append(observationMsgs...)
+        // 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
+        reminderMsg := e.injector.CheckAndInject(lastToolCall, lastToolResult)
+        if reminderMsg != nil {
+            // 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
+            // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
+            session.Append(*reminderMsg)
+        }
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
