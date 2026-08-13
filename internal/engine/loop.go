@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
@@ -19,6 +20,7 @@ type AgentEngine struct {
     EnableThinking bool
 	PlanMode       bool // 【新增】暴露给外部的计划模式开关
 	compactor *ctxpkg.Compactor // 【新增】压缩器实例
+	recovery *ctxpkg.RecoveryManager // 【新增】自愈管理器}
 }
 
 // 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
@@ -29,7 +31,8 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
         EnableThinking: enableThinking,
 		PlanMode:       planMode,
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
-        compactor:      ctxpkg.NewCompactor(3000, 6),
+        compactor:      ctxpkg.NewCompactor(300000, 10),
+		recovery: 		ctxpkg.NewRecoveryManager(), // 初始化 Recovery }
     }
 }
 
@@ -58,6 +61,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
         // 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
         compactedContext := e.compactor.Compact(contextHistory)
 
+		var currentTurnThinkingContent string
 		// ====================================================================
 		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
 		// ====================================================================
@@ -71,6 +75,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
+				currentTurnThinkingContent = thinkResp.Content
 				// 将思考过程持久化到 Session 中！
                 session.Append(*thinkResp)
                 // 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
@@ -83,10 +88,16 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
+		finalAssistantMsg := schema.Message{
+            Role:      schema.RoleAssistant,
+            Content:   strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
+            ToolCalls: actionResp.ToolCalls,
+        }
 		// 将大模型的行动响应持久化到 Session 中 
-		session.Append(*actionResp)
+		session.Append(finalAssistantMsg)
 		// 将模型的响应完整追加到上下文历史中
-		compactedContext = append(compactedContext, *actionResp)
+		// compactedContext = append(compactedContext, *actionResp)
+
 		if actionResp.Content != "" && reporter != nil {
             // 【触发 Reporter】: 输出阶段性总结或最终回复
             reporter.OnMessage(ctx, actionResp.Content)
@@ -114,6 +125,16 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
                 }
                 // 调用底层 Registry 执行工具（物理操作）
                 result := e.registry.Execute(ctx, call)
+
+				// 【核心拦截与注入】
+                finalOutput := result.Output
+                if result.IsError {
+                    // 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+                    finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
+                    log.Printf("  -> [Go-%d] ❌ 注入救援指南: %s\n", idx, finalOutput)
+                } else {
+                    log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
+                }
 
                 if reporter != nil {
                     // 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
