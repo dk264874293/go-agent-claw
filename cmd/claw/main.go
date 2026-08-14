@@ -6,14 +6,14 @@ import (
     // "fmt"
     "log"
     "os"
-    "net/http"
+    // "net/http"
     // "sync"
     // "time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
-	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
+	// "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
-	"github.com/dk264874293/go-agent-claw/internal/feishu"
+	// "github.com/dk264874293/go-agent-claw/internal/feishu"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -41,49 +41,74 @@ func main() {
     workDir += "/workspace"
 	// 2. 初始化LLM
     llmProvider := provider.NewZhipuOpenAIProvider("glm-4.7")
+    reporter := engine.NewTerminalReporter()
 
 	// 3. 初始化真实的 Tool Registry 
-	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir))
-    registry.Register(tools.NewEditFileTool(workDir))
+	readOnlyRegistry := tools.NewRegistry()
+	readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
+    readOnlyRegistry.Register(tools.NewBashTool(workDir))
+
+    // 为主智能体准备全功能注册表
+    mainRegistry := tools.NewRegistry()
+    mainRegistry.Register(tools.NewReadFileTool(workDir))
+    mainRegistry.Register(tools.NewWriteFileTool(workDir))
+    mainRegistry.Register(tools.NewBashTool(workDir))
+    mainRegistry.Register(tools.NewEditFileTool(workDir))
+
 
 	// 引擎本身变成无状态的，它不绑定 WorkDir（仅适用于本讲演示）
-    eng := engine.NewAgentEngine(llmProvider, registry, false,false) 
-    // reporter := engine.NewTerminalReporter()
+    eng := engine.NewAgentEngine(llmProvider, mainRegistry, false,false) 
 
-	sessionID := "test_command_intercept_001"
+    mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
+
+
+	sessionID := "test_subagent_001"
     sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: ""})
-	// 发起一个会导致读取大文件的恶意任务
-    // log.Printf("\n>>> 🚀 收到指令: %s\n", *promptPtr)
-    bot := feishu.NewFeishuBot(eng, sess)
-    handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher())
-    // 【核心注入】注册安全拦截 Middleware
-    registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
-        argsStr := string(call.Arguments)
-        // 检查是否命中高危特征库
-        if feishu.IsDangerousCommand(call.Name, argsStr) {
-            taskID := call.ID // 使用大模型生成的唯一 ToolCallID 作为 TaskID
-            // 挂起当前协程，发送消息给飞书，死死等待人类的审批！
-            allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(taskID, call.Name, argsStr, bot.Reporter())
-            if !allowed {
-                return false, reason // 拒绝，将理由传回给大模型
-            }
-            return true, "" // 同意，放行底层工具
-        }
-        // 没命中黑名单，直接 YOLO 放行
-        return true, ""
-    })
-    // 3. 注册路由并启动 HTTP 服务
-    http.HandleFunc("/webhook/event", handler)
-    port := ":48080"
-    log.Printf("🚀 go-tiny-claw 飞书服务端已启动，正在监听 %s 端口\n", port)
-    err := http.ListenAndServe(port, nil)
+
+    prompt := `
+    我需要你在这个遗留项目里，找到那个“核心密码”。
+    为了防止污染主上下文，请你务必派出子智能体（spawn_subagent）去执行探索任务。
+    你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件。
+    子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
+    `
+    log.Println("\n>>> 🚀 启动多智能体协同测试...")
+    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+    err := eng.Run(context.Background(), sess, reporter)
     if err != nil {
-        log.Fatalf("服务器启动失败: %v", err)
+        log.Fatalf("引擎运行崩溃: %v", err)
     }
+
+
+
+    // sess.Append(schema.Message{Role: schema.RoleUser, Content: ""})
+	// // 发起一个会导致读取大文件的恶意任务
+    // // log.Printf("\n>>> 🚀 收到指令: %s\n", *promptPtr)
+    // bot := feishu.NewFeishuBot(eng, sess)
+    // handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher())
+    // // 【核心注入】注册安全拦截 Middleware
+    // registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
+    //     argsStr := string(call.Arguments)
+    //     // 检查是否命中高危特征库
+    //     if feishu.IsDangerousCommand(call.Name, argsStr) {
+    //         taskID := call.ID // 使用大模型生成的唯一 ToolCallID 作为 TaskID
+    //         // 挂起当前协程，发送消息给飞书，死死等待人类的审批！
+    //         allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(taskID, call.Name, argsStr, bot.Reporter())
+    //         if !allowed {
+    //             return false, reason // 拒绝，将理由传回给大模型
+    //         }
+    //         return true, "" // 同意，放行底层工具
+    //     }
+    //     // 没命中黑名单，直接 YOLO 放行
+    //     return true, ""
+    // })
+    // // 3. 注册路由并启动 HTTP 服务
+    // http.HandleFunc("/webhook/event", handler)
+    // port := ":48080"
+    // log.Printf("🚀 go-tiny-claw 飞书服务端已启动，正在监听 %s 端口\n", port)
+    // err := http.ListenAndServe(port, nil)
+    // if err != nil {
+    //     log.Fatalf("服务器启动失败: %v", err)
+    // }
 
 
     // prompt := `
