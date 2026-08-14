@@ -2,7 +2,7 @@
  * @Author: 汪培良 rick_wang@yunquna.com
  * @Date: 2026-08-08 11:32:10
  * @LastEditors: 汪培良 rick_wang@yunquna.com
- * @LastEditTime: 2026-08-13 15:49:14
+ * @LastEditTime: 2026-08-14 16:26:48
  * @FilePath: /go-agent-claw/internal/tools/registry.go
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -14,6 +14,7 @@ import (
     "log"
     
     "github.com/dk264874293/go-agent-claw/internal/schema"
+    "github.com/dk264874293/go-agent-claw/internal/observability"
 )
 
 // MiddlewareFunc 定义了中间件的签名。
@@ -81,6 +82,13 @@ func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+    // 【埋点 5】：开启工具执行的 Span
+    ctx, span := observability.StartSpan(ctx, "Tool.Execute")
+    span.AddAttribute("tool_name", call.Name)
+    // 将 JSON 参数存入以备调试
+    span.AddAttribute("arguments", string(call.Arguments))
+    defer span.EndSpan() // 无论成功失败，确保结束
+
     // 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
     tool, exists := r.tools[call.Name]
     if !exists {
@@ -115,9 +123,18 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
             IsError:    true,
         }
     }
+    // 可以只截取输出的前 200 字符放入 Trace，防止 Trace 文件过度膨胀
+    span.AddAttribute("output_preview", truncate(output, 200))
     return schema.ToolResult{
         ToolCallID: call.ID,
         Output:     output,
         IsError:    false,
     }
+}
+
+func truncate(s string, max int) string {
+    if len(s) > max {
+        return s[:max] + "..."
+    }
+    return s
 }
