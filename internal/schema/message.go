@@ -2,7 +2,7 @@
  * @Author: 汪培良 rick_wang@yunquna.com
  * @Date: 2026-08-08 11:21:34
  * @LastEditors: 汪培良 rick_wang@yunquna.com
- * @LastEditTime: 2026-08-08 11:21:42
+ * @LastEditTime: 2026-08-14 13:58:24
  * @FilePath: /go-agent-claw/internal/schema/message.go
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -19,16 +19,22 @@ const (
     RoleAssistant Role = "assistant" // 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
 )
 
+// Usage 记录了单次大模型 API 调用的 Token 消耗
+type Usage struct {
+    PromptTokens     int `json:"prompt_tokens"`     // 输入的 Token 数量
+    CompletionTokens int `json:"completion_tokens"` // 产生的 Token 数量
+}
+
 // Message 代表上下文中传递的单条消息
 type Message struct {
     Role    Role   `json:"role"`
     Content string `json:"content"` // 存放纯文本内容
-
     // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
     ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-
     // 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
     ToolCallID string `json:"tool_call_id,omitempty"`
+    //是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
+     Usage *Usage `json:"usage,omitempty"`
 }
 
 // ToolCall 代表模型请求调用某个具体的工具
@@ -52,3 +58,4 @@ type ToolDefinition struct {
     Description string      `json:"description"`
     InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
 }
+

@@ -13,6 +13,7 @@ import (
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	// "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
+    "github.com/dk264874293/go-agent-claw/internal/observability"
 	// "github.com/dk264874293/go-agent-claw/internal/feishu"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
@@ -39,9 +40,16 @@ func main() {
 	// 1. 获取工作区物理边界
     workDir, _ := os.Getwd()
     workDir += "/workspace"
+    modelName := "glm-4.7"
 	// 2. 初始化LLM
-    llmProvider := provider.NewZhipuOpenAIProvider("glm-4.7")
+    llmProvider := provider.NewZhipuOpenAIProvider(modelName)
     reporter := engine.NewTerminalReporter()
+    
+    sessionID := "test_subagent_001"
+    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
+
+    // 2. 核心拼装：用 Tracker 将真实的大脑包裹起来 
+    trackedProvider := observability.NewCostTracker(llmProvider, modelName, sess)
 
 	// 3. 初始化真实的 Tool Registry 
 	readOnlyRegistry := tools.NewRegistry()
@@ -57,13 +65,12 @@ func main() {
 
 
 	// 引擎本身变成无状态的，它不绑定 WorkDir（仅适用于本讲演示）
-    eng := engine.NewAgentEngine(llmProvider, mainRegistry, false,false) 
+    eng := engine.NewAgentEngine(trackedProvider, mainRegistry, false,false) 
 
     mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
 
 
-	sessionID := "test_subagent_001"
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
+
 
     prompt := `
     我需要你在这个遗留项目里，找到那个“核心密码”。
@@ -77,6 +84,12 @@ func main() {
     if err != nil {
         log.Fatalf("引擎运行崩溃: %v", err)
     }
+    log.Printf("\n================ 财务报表 ================\n")
+    log.Printf("会话 ID: %s\n", sess.ID)
+    log.Printf("总消耗 Input Tokens: %d\n", sess.TotalPromptTokens)
+    log.Printf("总消耗 Output Tokens: %d\n", sess.TotalCompletionTokens)
+    log.Printf("总计费用 (CNY): ¥%.6f\n", sess.TotalCostCNY)
+    log.Printf("==========================================\n")
 
 
 

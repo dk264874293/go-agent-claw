@@ -139,6 +139,14 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
         Role: schema.RoleAssistant,
     }
 
+     // 【新增】提取 Usage 信息
+    if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+        resultMsg.Usage = &schema.Usage{
+            PromptTokens:     int(resp.Usage.InputTokens),
+            CompletionTokens: int(resp.Usage.OutputTokens),
+        }
+    }
+
     for _, block := range resp.Content {
         switch block.Type {
         case "text":
