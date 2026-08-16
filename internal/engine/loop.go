@@ -100,7 +100,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
                 thinkSpan.EndSpan()
 
                 if err != nil {
-                    return fmt.Errorf("Thinking 阶段生成失败: %w", err)
+                    return true, fmt.Errorf("Thinking 阶段生成失败: %w", err)
                 }
 
                 if thinkResp.Content != "" {
@@ -119,7 +119,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
             actSpan.EndSpan() // 结束行动跨度
 
             if err != nil {
-                return fmt.Errorf("Action 阶段生成失败: %w", err)
+                return true, fmt.Errorf("Action 阶段生成失败: %w", err)
             }
             finalAssistantMsg := schema.Message{
                 Role:      schema.RoleAssistant,
