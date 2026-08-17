@@ -87,7 +87,8 @@ var PricingModel = map[string]struct {
     InputPrice  float64
     OutputPrice float64
 }{
-    "glm-4.7":              {InputPrice: 0.15, OutputPrice: 0.15}, // 这里假定的大模型价格(每百万Token，tk)
+	"glm-4.7":              {InputPrice: 0.15, OutputPrice: 0.15}, // 这里假定的大模型价格(每百万Token，tk)
+	"glm-4.7-flashx":       {InputPrice: 0.15, OutputPrice: 0.15}, // 当前主力模型，暂沿用 glm-4.7 的假定价格，待官方定价校准
 }
 
 // CostTracker 是一个包装了真实 LLMProvider 的装饰器中间件

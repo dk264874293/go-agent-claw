@@ -18,7 +18,7 @@ go-agent-claw 是一个 Go 编写的 ReAct 风格 AI 智能体引擎（Think →
 
 ```bash
 go build -o claw ./cmd/claw        # 构建 CLI
-go run ./cmd/claw                  # 直接运行
+go run ./cmd/claw                  # 直接运行（不带 -prompt 进入交互对话模式 REPL，带 -prompt 单次执行后退出）
 go build ./cmd/... ./internal/...  # 构建模块内所有包
 go run ./cmd/bench                 # 基准测试 runner（会真实调用 LLM API，产生费用）
 ```
