@@ -67,8 +67,8 @@ func main() {
     registry.Register(tools.NewBashTool(workDir))
     registry.Register(tools.NewEditFileTool(workDir))
 
-	// 3. 初始化真实的 Tool Registry 
-	readOnlyRegistry := tools.NewRegistry()
+    // 为 Subagent (探路者) 准备受限的只读注册表：只能看，不能改
+    readOnlyRegistry := tools.NewRegistry()
 	readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
     readOnlyRegistry.Register(tools.NewBashTool(workDir))
 
@@ -89,6 +89,10 @@ func main() {
     // 将用户的 Prompt 压入 Session 记忆
     sess.Append(schema.Message{Role: schema.RoleUser, Content: *promptPtr})
 
+    // 【Subagent 装配】：为主智能体挂上"派出探路者"的委派能力。
+    // 注册必须发生在 eng.Run 之前 —— 引擎每轮通过 registry.GetAvailableTools() 动态取工具。
+    registry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
+
     // 6. 发起冲锋：启动 Main Loop！
     err = eng.Run(ctx, sess, reporter)
     if err != nil {
@@ -99,20 +103,5 @@ func main() {
     fmt.Printf("💰 Session 累计消耗: $%.6f | Token: Input %d, Output %d\n",
         sess.TotalCostCNY, sess.TotalPromptTokens, sess.TotalCompletionTokens)
     fmt.Println("==================================================")
-
-    // 为主智能体准备全功能注册表
-    // mainRegistry := tools.NewRegistry()
-    // mainRegistry.Register(tools.NewReadFileTool(workDir))
-    // mainRegistry.Register(tools.NewWriteFileTool(workDir))
-    // mainRegistry.Register(tools.NewBashTool(workDir))
-    // mainRegistry.Register(tools.NewEditFileTool(workDir))
-
-
-	// // 引擎本身变成无状态的，它不绑定 WorkDir（仅适用于本讲演示）
-    // eng := engine.NewAgentEngine(trackedProvider, mainRegistry, false,false) 
-
-    // mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
-
-
 
 }
