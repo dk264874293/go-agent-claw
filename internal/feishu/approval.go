@@ -81,27 +81,39 @@ func (m *ApprovalManager) ResolveApproval(taskID string, allowed bool, reason st
     }
 }
 
-// IsDangerousCommand 简单的正则检查黑名单，判断该工具调用是否需要审批
+// IsDangerousCommand 简单的正则检查黑名单，判断该工具调用是否需要触发人类审批
 func IsDangerousCommand(toolName string, args string) bool {
-    // 对于纯读取的工具，默认 YOLO 模式，全部放行
-    if toolName != "bash" && toolName != "write_file" && toolName != "edit_file" {
-        return false 
+    // 白名单放行：对于纯读取工具，默认 YOLO 模式，全部放行
+    if toolName == "read_file" {
+        return false
+    }
+
+    // 【剧本设定】：在生产服务器的 AgentOps 场景下，修改任何文件都是高危操作！
+    // 我们不允许 Agent 擅自使用 write_file 覆写文件，或使用 edit_file 篡改代码。
+    if toolName == "write_file" || toolName == "edit_file" {
+        return true
     }
 
     // 针对 bash 的高危模式匹配
     if toolName == "bash" {
+        // 危险指令特征库 (模拟真实的运维黑名单)
         dangerousPatterns := []string{
-            `rm\s+-r`,   // 级联删除
-            `sudo\s+`,   // 提权
-            `drop\s+`,   // 数据库删除
-            `>.*\.go`,   // 恶意覆盖源代码
+            `rm\s+-r`,          // 级联删除
+            `sudo\s+`,          // 提权操作
+            `drop\s+`,          // 数据库危险命令
+            `>.*\.go`,          // 恶意覆盖源代码
+            `nginx\s+-s`,       // 【针对第 22 讲剧本】：拦截 Nginx 服务重启或停止
+            `systemctl\s+`,     // 拦截系统级服务管理
+            `kill\s+`,          // 拦截杀进程操作
         }
+
         for _, p := range dangerousPatterns {
-            matched, _ := regexp.MatchString(p, args)
-            if matched {
-                return true
+            if matched, _ := regexp.MatchString(p, args); matched {
+                return true // 命中任何一条黑名单，必须挂起审批
             }
         }
     }
+
+    // 如果没有命中高危特征，默认放行 (例如简单的 ls -la, tail -n 50 等探测命令)
     return false
 }
