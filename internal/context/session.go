@@ -56,6 +56,24 @@ func (s *Session) Append(msgs ...schema.Message) {
     // s.SaveToDisk()
 }
 
+// MessageCount 返回会话历史中的消息总数（用户输入、模型回复与工具结果均计入）
+func (s *Session) MessageCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.history)
+}
+
+// ResetHistory 清空对话上下文，但保留累计计费统计——账单是已发生的事实，
+// 不随上下文清零而消失（CostTracker 持有的 Session 指针也保持不变，计费链路不受影响）。
+// 【阶段三联动预留点】：会话落盘实现后，此处需同步截断对应的 JSONL 文件。
+func (s *Session) ResetHistory() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = make([]schema.Message, 0)
+	s.UpdatedAt = time.Now()
+}
+
+
 // syntheticContextNotice 是方案 A 兜底时注入的合成 user 前缀。
 // 它不进入 Session 历史，每次开窗时现做，只为满足“会话以 user 开场”的 API 校验。
 const syntheticContextNotice = "[系统提示] 更早的对话历史（含最初的任务指令）已被截断。以下是最近的工作记录，请据此继续执行当前任务，不要重复已完成的步骤。"

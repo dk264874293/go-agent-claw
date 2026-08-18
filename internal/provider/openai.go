@@ -18,6 +18,22 @@ type OpenAIProvider struct {
     model  string
 }
 
+// NewOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向数云 AI 网关
+func NewOpenAIProvider(model string) *OpenAIProvider {
+    apiKey := os.Getenv("OPENAI_API_KEY")
+    if apiKey == "" {
+        panic("请设置 OPENAI_API_KEY 环境变量")
+    }
+    // 注意：必须带 /v1 前缀。网关根路径是 Web 控制台，未知路由会返回 HTML 首页（HTTP 200），
+    // 导致 SDK 按 JSON 反序列化时抛出 content-type 'text/html' 错误
+    baseURL := "https://syaiapihub.shuyun.cn/v1/"
+
+    return &OpenAIProvider{
+        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        model:  model,
+    }
+}
+
 // NewDeepseekOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
 func NewDeepseekOpenAIProvider(model string) *OpenAIProvider {
     apiKey := os.Getenv("DEEPSEEK_API_KEY")

@@ -26,6 +26,7 @@ go run ./cmd/bench                 # 基准测试 runner（会真实调用 LLM A
 - **不要使用 `go build ./...`**：会因 `workspace/main.go` 是空草稿文件而失败（当前 `cmd/agentops/main.go` 同样是空文件，也会炸）。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
 - 测试：`internal/context/session_test.go` 覆盖 `GetWorkingMemory` 的窗口裁剪逻辑（运行 `go test ./internal/context/`）；其余包暂无 `_test.go` 文件。
 - 需要 `ZHIPU_API_KEY`（在 `.env` 或环境变量中，缺失会直接 fatal）。飞书机器人代码额外需要 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
+- REPL 内置斜杠命令：`/help` `/exit` `/cost` `/status` `/clear`——本地拦截处理，不进 Session、不调用 LLM、不计费；`/clear` 走 `Session.ResetHistory()`（清历史、保账单）。输入独占一行的 `"""` 进入多行输入模式，再一行 `"""` 结束提交。
 
 ## 架构
 
