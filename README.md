@@ -6,13 +6,14 @@
 
 - **ReAct 主循环**：`Think → Act → Observe` 循环驱动，模型自主决定何时调用工具、何时宣告任务完成。
 - **双阶段推理（Thinking 模式）**：开启后每轮发两次 LLM 调用——先剥夺工具强制规划，再带工具精准行动。
-- **会话与工作记忆**：`Session` 持久化完整历史，主循环只发送最近 20 条消息作为短期工作记忆；窗口滑动时自动保住 `ToolCall↔ToolResult` 配对与首条 user 消息的 API 校验。
+- **会话与工作记忆**：`Session` 在进程内维护历史，主循环只发送最近 20 条消息作为短期工作记忆；窗口滑动时自动保住 `ToolCall↔ToolResult` 配对与首条 user 消息的 API 校验。
+- **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；当前入口使用最多 20 轮、总超时 5 分钟，超时依赖 Provider 和工具响应 context。
 - **上下文压缩器（Compactor）**：发给模型前对超长上下文做掩码/截断，保护最近消息不被远古日志吃光 token 预算。
 - **并发工具执行**：同一轮的多个工具调用在 goroutine 中并发执行，各自写入预分配切片的不同槽位，无锁聚合。
-- **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出只读"探路者"，在最多 10 轮内深度探索并返回精炼摘要。
+- **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出探索型子任务，在最多 10 轮内搜集信息并返回摘要；当前子任务仍有通用 Bash，尚无可靠的只读隔离。
 - **错误自愈（RecoveryManager）**：工具报错在送回模型前自动诊断并注入"救援提示"，引导模型自我修正。
 - **死循环探测（ReminderInjector）**：对连续重复的工具调用做指纹识别，触发时注入严厉提醒打破局部执念。
-- **可观测性**：`CostTracker` 包裹 Provider 为 Session 计费（token/成本）；`Span` 树形链路追踪自动导出到 `<workDir>/.claw/traces`。
+- **可观测性**：`CostTracker` 记录 Token 与已配置模型的估算费用；`Span` 树形链路追踪导出到 `<workDir>/.claw/traces`。默认模型尚无价格配置。
 - **计划模式（PlanMode）**：PromptComposer 按 `planMode` 开关组装不同的系统提示词。
 - **技能加载（SkillLoader）**：从工作区加载 Markdown 技能文件注入系统提示词。
 - **双 Provider 支持**：OpenAI 兼容路线（智谱 GLM）与 Anthropic 兼容路线（DeepSeek），一个接口随时切换。
@@ -27,7 +28,8 @@ cmd/bench/main.go           — 基准测试 runner（会真实调用 LLM API，
 internal/schema/            — 共享类型：Message、Role、ToolCall、ToolResult、ToolDefinition
 internal/provider/          — LLMProvider 接口 + OpenAI 兼容 (openai.go) 与
                               Anthropic 兼容 (claude.go) 两套实现
-internal/engine/loop.go     — AgentEngine：ReAct 主循环 + 子智能体的 RunSub
+internal/engine/            — AgentEngine：有上限的 ReAct 主循环 + 子智能体的 RunSub
+internal/run/               — RunOptions、运行状态和终止原因
 internal/engine/            — Reporter 接口 + TerminalReporter、ReminderInjector（防死循环）
 internal/context/           — Session（历史 + 工作记忆）、Compactor、RecoveryManager、
                               PromptComposer（系统提示词、计划模式）、技能加载器
@@ -50,8 +52,8 @@ internal/feishu/            — 飞书/Lark 机器人 + 审批流（目前未接
 ### 环境要求
 
 - Go 1.25+
-- `ZHIPU_API_KEY`（放在 `.env` 或环境变量中，缺失会直接 fatal）
-- 飞书机器人（可选）：`FEISHU_APP_ID` / `FEISHU_APP_SECRET`
+- CLI 需要 `OPENAI_API_KEY`；基准测试需要 `ZHIPU_API_KEY`，会真实调用 API
+- 独立飞书服务需要 `ZHIPU_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`
 
 ### 构建与运行
 
@@ -69,43 +71,44 @@ go build ./cmd/... ./internal/...
 go run ./cmd/bench
 ```
 
-> ⚠️ **不要使用 `go build ./...`**：`workspace/main.go` 是空草稿文件会导致构建失败（`cmd/agentops/main.go` 同理）。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
+> 不要使用 `go build ./...`：`workspace/` 是演示和运行产物目录，可能包含不能参与正式构建的草稿代码。`cmd/agentops` 是可编译的独立飞书服务。
 
 ### CLI 参数
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `-prompt` | 要交给 Agent 执行的任务描述（必填） | — |
+| `-prompt` | 要交给 Agent 执行的任务描述；留空时进入 REPL | — |
 | `-dir` | Agent 运行的工作区目录路径 | 当前目录 |
-| `-session` | 会话 ID，支持断点续传 | `cli_default_session` |
+| `-session` | 当前进程内复用的会话 ID；重启后不恢复历史 | `cli_default_session` |
 
-运行结束后会打印任务总耗时与 Session 累计成本（美元）和 token 消耗。
+单任务运行结束后会打印 RunID、终止原因、总耗时与 Session 累计用量；失败时退出码非零。当前费用价格表未覆盖默认模型，费用显示不能作为准确账单。
 
 ### 运行测试
 
 ```bash
-go test ./internal/context/
+go test ./internal/...
+go test ./cmd/claw
 ```
 
-`internal/context/session_test.go` 覆盖 `GetWorkingMemory` 的窗口裁剪逻辑，其余包暂无 `_test.go` 文件。
+测试覆盖工作记忆、M1 运行边界、工具错误反馈及 CLI 运行结果；这些测试使用 Mock Provider，不调用真实 API。
 
 ## 🧠 工作原理
 
 ### 1. 装配流程（cmd/claw/main.go）
 
 ```
-加载 .env → 校验 ZHIPU_API_KEY
+加载 .env → 校验 OPENAI_API_KEY
     ↓
 Session（绑定 WorkDir） ← GlobalSessionMgr.GetOrCreate
     ↓
-Provider (glm-4.7-flashx) → CostTracker 包裹 → trackedProvider
+Provider (gpt-5.6-sol，数云兼容网关) → CostTracker 包裹 → trackedProvider
     ↓
 Registry：read_file / write_file / bash / edit_file + spawn_subagent
 readOnlyRegistry：read_file / bash（专供子智能体）
     ↓
 AgentEngine(trackedProvider, registry, enableThinking, planMode)
     ↓
-eng.Run(ctx, sess, reporter)  →  ReAct 主循环
+eng.Run(ctx, sess, reporter, run.Options{MaxTurns: 20, Timeout: 5m}) → ReAct 主循环
 ```
 
 ### 2. ReAct 主循环（internal/engine/loop.go）
@@ -114,11 +117,11 @@ eng.Run(ctx, sess, reporter)  →  ReAct 主循环
 
 1. **上下文组装**：动态构建 System Prompt（PromptComposer）+ 最近 20 条工作记忆。
 2. **压缩**：Compactor 检查字符总量，超标时对早期消息掩码化、超大日志掐头去尾。
-3. **Thinking 阶段**（可选）：不带工具调用一次 LLM 强制规划，思考内容持久化进 Session。
+3. **Thinking 阶段**（可选）：不带工具调用一次 LLM 强制规划，思考内容追加到内存 Session。
 4. **Action 阶段**：带工具列表调用 LLM，拿到工具调用请求。
 5. **并发执行**：所有工具调用在 goroutine 中并发跑，错误经 RecoveryManager 注入救援提示。
 6. **Observation**：结果以携带 `ToolCallID` 的 user 消息回写 Session；ReminderInjector 探测死循环。
-7. 模型不再请求工具时，任务宣告完成。
+7. 模型不再请求工具时，Run 标为技术性完成；达到轮数或总超时时返回对应终止原因。技术性完成不代表任务经过验收。
 
 ### 3. 工作记忆的两档窗口策略
 
@@ -136,7 +139,7 @@ eng.Run(ctx, sess, reporter)  →  ReAct 主循环
 
 主智能体调用 `spawn_subagent` 时，引擎拉起一个不依赖外部 Session 的一次性受限循环：
 
-- 只挂载 `readOnlyRegistry`（read_file + bash），**只能看不能改**；
+- 挂载 `readOnlyRegistry`（read_file + bash）；通用 Bash 仍可写入工作区外文件，当前并不真正只读；
 - 最多 10 个 Turn，超时强制召回；
 - System Prompt 严厉警告必须用工具找答案、禁止凭空捏造；
 - 不再调用工具即视为汇报完成，返回纯文本摘要给主智能体。
@@ -145,7 +148,7 @@ eng.Run(ctx, sess, reporter)  →  ReAct 主循环
 
 ## 📊 可观测性
 
-- **CostTracker**：装饰器模式包裹任意 `LLMProvider`，每次 Generate 后把 token 与成本累加到 Session（`RecordUsage`），任务结束打印总账。
+- **CostTracker**：装饰器模式包裹 `LLMProvider`，将 Token 与已配置模型的估算费用累加到内存 Session；默认模型费用当前未配置，不应把显示的零费用当作真实账单。
 - **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `CLI.TaskRun → Agent.Run → Turn-N → LM.Thinking / LLM.Action` 的树形结构，任务结束后 JSON 导出到 `<workDir>/.claw/traces/trace_<sessionID>_<时间戳>.json`，可完整回放执行链路。
 
 ## 🧰 基准测试（cmd/bench）
@@ -164,9 +167,9 @@ observability.TestCase{
 
 内置两个用例：模糊替换准确性（edit_file）、代码阅读 + 单测生成综合能力。⚠️ 跑分会真实调用 LLM API，产生费用。
 
-## 💬 飞书机器人（未接线）
+## 💬 飞书机器人（独立入口）
 
-`internal/feishu/` 提供完整的飞书/Lark 机器人 + 审批流能力：`FeishuReporter` 把工具执行轨迹推送到群聊，`ApprovalManager` 对危险命令（`IsDangerousCommand`）挂起等待人工审批。目前 `main.go` 中的 HTTP 服务保持注释状态，启用需额外配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
+`cmd/agentops` 是可编译的独立飞书 HTTP 服务，使用 `internal/feishu/` 的事件处理、Reporter 和审批管理。它与 CLI 分开启动；当前审批等待没有超时或 context 取消，尚不适合多用户试点。
 
 ## 🔧 扩展指南
 
@@ -194,7 +197,7 @@ type LLMProvider interface {
 }
 ```
 
-2. 加一个读环境变量的构造函数，在 `cmd/claw/main.go` 接线换上即可。当前默认 `provider.NewZhipuOpenAIProvider("glm-4.7-flashx")`；`NewDeepseekClaudeProvider` 走 Anthropic 兼容路线。
+2. 在构造函数内集中读取环境变量，并在入口接线。当前 CLI 默认 `provider.NewOpenAIProvider("gpt-5.6-sol")`；`NewDeepseekClaudeProvider` 走 Anthropic 兼容路线。
 
 ### 工具拦截（中间件）
 
@@ -215,7 +218,7 @@ registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
 - **包名怪癖**：`internal/eval/benchmark.go` 位于 `internal/eval/` 目录却声明 `package observability`。导入路径是 `internal/eval`，但引用时写作 `observability.*`。
 - **GLM 消息校验**：改动截断逻辑时必须保住 `ToolCall↔ToolResult` 配对，且首条非 system 消息必须是普通 user 消息。
 - **引擎构造签名**：`NewAgentEngine(provider, registry, enableThinking, planMode)`——thinking 阶段每轮发两次 LLM 调用（先不带工具做规划，再带工具行动）。
-- **飞书接线**：`main.go` 中飞书 HTTP 服务保持注释状态，要有意识地启用，不要顺手打开。
+- **飞书入口**：`cmd/agentops` 是独立 HTTP 服务；CLI 不会启动它。其审批等待仍缺少超时与 context 取消。
 
 ## MIT 许可
 

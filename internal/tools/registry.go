@@ -7,14 +7,15 @@
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 package tools
+
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    
-    "github.com/dk264874293/go-agent-claw/internal/schema"
-    "github.com/dk264874293/go-agent-claw/internal/observability"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
 // MiddlewareFunc 定义了中间件的签名。
@@ -23,118 +24,129 @@ type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed boo
 
 // BaseTool 是所有具体工具必须实现的通用接口
 type BaseTool interface {
-    // Name 返回工具的全局唯一名称 (大模型通过这个名字调用它)
-    Name() string
-    // Definition 返回用于提交给大模型的工具元信息和参数 JSON Schema
-    Definition() schema.ToolDefinition
-    // Execute 接收大模型吐出的 JSON 参数，执行具体业务逻辑
-    // 注意：参数是 json.RawMessage，反序列化由各个具体工具内部自行处理
-    Execute(ctx context.Context, args json.RawMessage) (string, error)
+	// Name 返回工具的全局唯一名称 (大模型通过这个名字调用它)
+	Name() string
+	// Definition 返回用于提交给大模型的工具元信息和参数 JSON Schema
+	Definition() schema.ToolDefinition
+	// Execute 接收大模型吐出的 JSON 参数，执行具体业务逻辑
+	// 注意：参数是 json.RawMessage，反序列化由各个具体工具内部自行处理
+	Execute(ctx context.Context, args json.RawMessage) (string, error)
 }
-
-
 
 // Registry 定义了工具的注册与分发执行接口
 type Registry interface {
-    // Register 挂载一个新的工具到系统中
-    Register(tool BaseTool)
-    Use(mw MiddlewareFunc)
-    // GetAvailableTools 返回当前系统挂载的所有可用工具的 Schema
-    GetAvailableTools() []schema.ToolDefinition
+	// Register 挂载一个新的工具到系统中
+	Register(tool BaseTool)
+	Use(mw MiddlewareFunc)
+	// GetAvailableTools 返回当前系统挂载的所有可用工具的 Schema
+	GetAvailableTools() []schema.ToolDefinition
 
-    // Execute 实际执行模型请求的工具，并返回结果
-    Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
+	// Execute 实际执行模型请求的工具，并返回结果
+	Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
 }
 
 // registryImpl 是 Registry 接口的默认实现
 type registryImpl struct {
-    // 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
-    tools map[string]BaseTool 
-    middlewares []MiddlewareFunc
+	// 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
+	tools       map[string]BaseTool
+	middlewares []MiddlewareFunc
 }
 
 func NewRegistry() Registry {
-    return &registryImpl{
-        tools: make(map[string]BaseTool),
-        middlewares: make([]MiddlewareFunc, 0),
-    }
+	return &registryImpl{
+		tools:       make(map[string]BaseTool),
+		middlewares: make([]MiddlewareFunc, 0),
+	}
 }
 
 func (r *registryImpl) Use(mw MiddlewareFunc) {
-    r.middlewares = append(r.middlewares, mw)
+	r.middlewares = append(r.middlewares, mw)
 }
 
 func (r *registryImpl) Register(tool BaseTool) {
-    name := tool.Name()
-    if _, exists := r.tools[name]; exists {
-        log.Printf("[Warning] 工具 '%s' 已经被注册，将被覆盖。\n", name)
-    }
-    r.tools[name] = tool
-    log.Printf("[Registry] 成功挂载工具: %s\n", name)
+	name := tool.Name()
+	if _, exists := r.tools[name]; exists {
+		log.Printf("[Warning] 工具 '%s' 已经被注册，将被覆盖。\n", name)
+	}
+	r.tools[name] = tool
+	log.Printf("[Registry] 成功挂载工具: %s\n", name)
 }
 
 func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
-    var defs []schema.ToolDefinition
-    for _, tool := range r.tools {
-        defs = append(defs, tool.Definition())
-    }
-    return defs
+	var defs []schema.ToolDefinition
+	for _, tool := range r.tools {
+		defs = append(defs, tool.Definition())
+	}
+	return defs
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-    // 【埋点 5】：开启工具执行的 Span
-    ctx, span := observability.StartSpan(ctx, "Tool.Execute")
-    span.AddAttribute("tool_name", call.Name)
-    // 将 JSON 参数存入以备调试
-    span.AddAttribute("arguments", string(call.Arguments))
-    defer span.EndSpan() // 无论成功失败，确保结束
+	// 【埋点 5】：开启工具执行的 Span
+	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
+	span.AddAttribute("tool_name", call.Name)
+	// 将 JSON 参数存入以备调试
+	span.AddAttribute("arguments", string(call.Arguments))
+	defer span.EndSpan() // 无论成功失败，确保结束
 
-    // 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
-    tool, exists := r.tools[call.Name]
-    if !exists {
-        errMsg := fmt.Sprintf("Error: 系统中不存在名为 '%s' 的工具。", call.Name)
-        return schema.ToolResult{
-            ToolCallID: call.ID,
-            Output:     errMsg,
-            IsError:    true, // 标记为错误，模型看到后会尝试纠正
-        }
-    }
+	if err := ctx.Err(); err != nil {
+		return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+	}
 
-    // 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
-    for _, mw := range r.middlewares {
-        allowed, reason := mw(ctx, call)
-        if !allowed {
-            log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
-            return schema.ToolResult{
-                ToolCallID: call.ID,
-                Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
-                IsError:    true, // 必须返回 Error，强制大模型阅读拒绝理由
-            }
-        }
-    }
-    // 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
-    output, err := tool.Execute(ctx, call.Arguments)
-    // 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
-    if err != nil {
-        errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
-        return schema.ToolResult{
-            ToolCallID: call.ID,
-            Output:     errMsg,
-            IsError:    true,
-        }
-    }
-    // 可以只截取输出的前 200 字符放入 Trace，防止 Trace 文件过度膨胀
-    span.AddAttribute("output_preview", truncate(output, 200))
-    return schema.ToolResult{
-        ToolCallID: call.ID,
-        Output:     output,
-        IsError:    false,
-    }
+	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
+	tool, exists := r.tools[call.Name]
+	if !exists {
+		errMsg := fmt.Sprintf("Error: 系统中不存在名为 '%s' 的工具。", call.Name)
+		return schema.ToolResult{
+			ToolCallID: call.ID,
+			Output:     errMsg,
+			IsError:    true, // 标记为错误，模型看到后会尝试纠正
+		}
+	}
+
+	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+	for _, mw := range r.middlewares {
+		if err := ctx.Err(); err != nil {
+			return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+		}
+		allowed, reason := mw(ctx, call)
+		if !allowed {
+			log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
+			return schema.ToolResult{
+				ToolCallID: call.ID,
+				Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
+				IsError:    true, // 必须返回 Error，强制大模型阅读拒绝理由
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+	}
+	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
+	output, err := tool.Execute(ctx, call.Arguments)
+	// 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+	if err != nil {
+		errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
+		if output != "" {
+			errMsg = output + "\n" + errMsg
+		}
+		return schema.ToolResult{
+			ToolCallID: call.ID,
+			Output:     errMsg,
+			IsError:    true,
+		}
+	}
+	// 可以只截取输出的前 200 字符放入 Trace，防止 Trace 文件过度膨胀
+	span.AddAttribute("output_preview", truncate(output, 200))
+	return schema.ToolResult{
+		ToolCallID: call.ID,
+		Output:     output,
+		IsError:    false,
+	}
 }
 
 func truncate(s string, max int) string {
-    if len(s) > max {
-        return s[:max] + "..."
-    }
-    return s
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -22,12 +23,17 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	// "github.com/dk264874293/go-agent-claw/internal/feishu"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
+	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 	"github.com/joho/godotenv"
 )
 
 func main() {
+	os.Exit(runMain())
+}
+
+func runMain() int {
 	// 加载 .env 文件
 	godotenv.Overload()
 	// 确保已设置 api key
@@ -54,7 +60,7 @@ func main() {
 	}
 	fmt.Println("==================================================")
 	fmt.Printf("🚀 启动 go-agent-claw CLI 引擎 (%s)...\n", mode)
-	fmt.Printf("📁 锁定工作区: %s\n", workDir)
+	fmt.Printf("📁 默认工作目录: %s\n", workDir)
 	fmt.Println("==================================================")
 
 	var realProvider provider.LLMProvider
@@ -73,7 +79,7 @@ func main() {
 	registry.Register(tools.NewBashTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
 
-	// 为 Subagent (探路者) 准备受限的只读注册表：只能看，不能改
+	// 为 Subagent 准备探索工具；通用 Bash 尚无只读隔离。
 	readOnlyRegistry := tools.NewRegistry()
 	readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
 	readOnlyRegistry.Register(tools.NewBashTool(workDir))
@@ -118,18 +124,30 @@ func main() {
 		// 6. 交互对话模式：读一行、跑一轮，直到用户主动退出
 		runREPL(ctx, eng, sess, reporter, modelName)
 		printSummary("👋 会话结束", procStart, sess)
+		return 0
 	} else {
 		// 6. 发起冲锋：单任务模式，行为与历史版本保持一致
 		fmt.Printf("\n🎯 收到任务: %s\n\n", *promptPtr)
 		// 将用户的 Prompt 压入 Session 记忆
 		sess.Append(schema.Message{Role: schema.RoleUser, Content: *promptPtr})
 
-		if err := eng.Run(ctx, sess, reporter); err != nil {
-			// 不再 log.Fatalf：让 defer 的 trace 导出有机会执行
-			fmt.Printf("\n💥 引擎运行崩溃: %v\n", err)
+		result, err := eng.Run(ctx, sess, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
+		if code := reportSingleRun(os.Stdout, result, err); code != 0 {
+			printSummary("任务结束", procStart, sess)
+			return code
 		}
-		printSummary("✨ 任务圆满结束", procStart, sess)
+		printSummary("✨ 运行结束", procStart, sess)
+		return 0
 	}
+}
+
+func reportSingleRun(out io.Writer, result runpkg.Result, err error) int {
+	if err != nil {
+		fmt.Fprintf(out, "\n💥 运行失败 | RunID: %s | 原因: %s | 错误: %v\n", result.RunID, result.Reason, err)
+		return 1
+	}
+	fmt.Fprintf(out, "\n✅ RunID: %s | 原因: %s\n", result.RunID, result.Reason)
+	return 0
 }
 
 // runREPL 启动交互对话循环：每读入一行用户输入，就唤醒一次引擎。
@@ -214,7 +232,7 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 		completionBefore := sess.TotalCompletionTokens
 
 		turnStart := time.Now()
-		err := eng.Run(ctx, sess, reporter)
+		result, err := eng.Run(ctx, sess, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
 
 		// 失败轮也可能已产生若干次成功的 LLM 调用（已计入累计账单），
 		// 因此增量统计不区分成败，保证 /cost 的增量与累计值口径一致
@@ -230,11 +248,11 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 				return true
 			}
 			// 可恢复错误（如 API 抖动）：打印后继续对话，绝不杀掉整个会话
-			fmt.Printf("💥 本轮执行失败: %v（会话已保留，可继续输入）\n\n", err)
+			fmt.Printf("💥 本轮执行失败 | RunID: %s | 原因: %s | 错误: %v（会话已保留，可继续输入）\n\n", result.RunID, result.Reason, err)
 			return false
 		}
-		fmt.Printf("✅ 本轮耗时: %v | 本轮消耗: ¥%.6f (In %d / Out %d tk) | Session 累计: ¥%.6f\n\n",
-			time.Since(turnStart).Round(time.Millisecond), lastDeltaCost, lastDeltaPrompt,
+		fmt.Printf("✅ RunID: %s | 原因: %s | 本轮耗时: %v | 本轮消耗: ¥%.6f (In %d / Out %d tk) | Session 累计: ¥%.6f\n\n",
+			result.RunID, result.Reason, time.Since(turnStart).Round(time.Millisecond), lastDeltaCost, lastDeltaPrompt,
 			lastDeltaCompletion, sess.TotalCostCNY)
 		return false
 	}
