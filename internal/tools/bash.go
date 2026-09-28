@@ -12,9 +12,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
-	"time"
+	"strings"
 
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
@@ -53,47 +54,44 @@ type bashArgs struct {
 }
 
 func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	output, _, err := t.ExecuteDetailed(ctx, args)
+	return output, err
+}
+
+// ExecuteDetailed 在有界缓冲中收集输出，并在结束时回收同组进程。
+func (t *BashTool) ExecuteDetailed(ctx context.Context, args json.RawMessage) (string, schema.ToolMetadata, error) {
 	var input bashArgs
+	var meta schema.ToolMetadata
 	if err := json.Unmarshal(args, &input); err != nil {
-		return "", fmt.Errorf("参数解析失败: %w", err)
+		return "", meta, fmt.Errorf("参数解析失败: %w", err)
 	}
-
-	// 【驾驭底线 1】：Time Budgeting (时间预算与超时控制)
-	// 给予 bash 命令一个最大执行时间，防止大模型卡死进程 (比如运行了 top 或持续监听的 Web 服务)
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if strings.TrimSpace(input.Command) == "" {
+		return "", meta, fmt.Errorf("command 不能为空")
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, ExecutionOptionsFrom(ctx).Timeout)
 	defer cancel()
-
-	// 在 macOS/Linux 下，我们通过将指令包裹在 `bash -c` 中执行，以支持环境变量、管道和逻辑与(&&)等复杂 Shell 语法。
 	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
-
-	// 【驾驭底线 2】：绑定执行的工作区目录
-	// 确保命令默认在用户指定的 WorkDir 下执行，而不是引擎启动时的绝对路径。
 	cmd.Dir = t.workDir
-
-	// 执行并捕获 CombinedOutput (合并 stdout 和 stderr)
-	out, err := cmd.CombinedOutput()
-	outputStr := string(out)
-
-	// 保留已取得的终端输出，同时把超时和取消标记为工具失败。
+	if err := configureProcess(cmd); err != nil {
+		return "", meta, err
+	}
+	var buffer boundedOutput
+	cmd.Stdout, cmd.Stderr = &buffer, &buffer
+	err := cmd.Run()
+	// 正常退出也清理同组后台进程；主动脱离进程组需后续隔离后端治理。
+	_ = killProcessGroup(cmd)
+	output, truncated := buffer.snapshot()
+	meta.Truncated = truncated
 	if timeoutCtx.Err() != nil {
-		return outputStr, fmt.Errorf("命令执行中断: %w", timeoutCtx.Err())
+		meta.TimedOut = errors.Is(timeoutCtx.Err(), context.DeadlineExceeded)
+		meta.Cancelled = errors.Is(timeoutCtx.Err(), context.Canceled)
+		return output, meta, fmt.Errorf("命令执行中断: %w", timeoutCtx.Err())
 	}
-
-	// Registry 会把非零退出和已取得的 stdout/stderr 一并交给模型。
 	if err != nil {
-		return outputStr, fmt.Errorf("命令执行失败: %w", err)
+		return output, meta, fmt.Errorf("命令执行失败: %w", err)
 	}
-
-	// 如果没有终端输出（比如仅仅执行了 mkdir），给模型一个明确的执行成功的反馈
-	if outputStr == "" {
-		return "命令执行成功，无终端输出。", nil
+	if output == "" {
+		output = "命令执行成功，无终端输出。"
 	}
-
-	// 【驾驭底线 4】：长度截断保护 (防 OOM)
-	const maxLen = 8000
-	if len(outputStr) > maxLen {
-		return fmt.Sprintf("%s\n\n...[终端输出过长，已截断至前 %d 字节]...", outputStr[:maxLen], maxLen), nil
-	}
-
-	return outputStr, nil
+	return output, meta, nil
 }

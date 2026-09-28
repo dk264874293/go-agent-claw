@@ -181,9 +181,9 @@ func TestSession_ResetHistoryAndMessageCount(t *testing.T) {
 	if n := s.MessageCount(); n != 0 {
 		t.Fatalf("清空后应为 0 条消息，实际 %d 条", n)
 	}
-	if s.TotalPromptTokens != 100 || s.TotalCompletionTokens != 200 || s.TotalCostCNY != 0.5 {
+	if s.UsageSnapshot().TotalPromptTokens != 100 || s.UsageSnapshot().TotalCompletionTokens != 200 || s.UsageSnapshot().TotalCostCNY != 0.5 {
 		t.Fatalf("清空上下文不应清零账单，实际: ¥%.6f, In %d, Out %d",
-			s.TotalCostCNY, s.TotalPromptTokens, s.TotalCompletionTokens)
+			s.UsageSnapshot().TotalCostCNY, s.UsageSnapshot().TotalPromptTokens, s.UsageSnapshot().TotalCompletionTokens)
 	}
 
 	// 清空后继续对话：结构必须仍满足 API 的两道硬性校验

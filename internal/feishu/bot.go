@@ -13,7 +13,6 @@ import (
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
-	"github.com/dk264874293/go-agent-claw/internal/schema"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -27,6 +26,9 @@ type reporterKey struct{}
 
 // ContextWithReporter 将专属的 Reporter 封入上下文
 func ContextWithReporter(ctx context.Context, r engine.Reporter) context.Context {
+	if r == nil {
+		return ctx
+	}
 	return context.WithValue(ctx, reporterKey{}, r)
 }
 
@@ -92,8 +94,8 @@ func (b *FeishuBot) GetEventDispatcher() *dispatcher.EventDispatcher {
 				log.Printf("[Feishu] 会话 %s: 🚫 已拒绝任务 %s", chatId, taskID)
 				return nil
 			}
-			// 如果是普通对话，新开一个 Goroutine 去启动 Agent，防止阻塞 Webhook
-			go b.handleAgentRun(chatId, contentStr)
+			// 普通对话先同步登记会话票据，再异步执行，避免调度改变接收顺序。
+			b.handleAgentRun(chatId, contentStr)
 			return nil
 		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
@@ -104,22 +106,21 @@ func (b *FeishuBot) GetEventDispatcher() *dispatcher.EventDispatcher {
 }
 
 func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
-	// 为当前并发请求实例化一个专属的 Reporter
-	reporter := &FeishuReporter{
-		client: b.client,
-		chatId: chatId,
-	}
-	// 1. 获取物理隔离的 Session
-	sess := ctxpkg.GlobalSessionMgr.GetOrCreate(chatId, b.workDir)
-	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
-	// 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
-	eng := b.factory(sess)
-	// 3. 【驾驭核心】：将专属的 reporter 塞入 Context 并传给引擎！
-	runCtx := ContextWithReporter(context.Background(), reporter)
-	result, err := eng.Run(runCtx, sess, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
-	if err != nil {
-		reporter.sendMsg(fmt.Sprintf("❌ Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v", result.RunID, result.Reason, err))
-	}
+	reporter := &FeishuReporter{client: b.client, chatId: chatId}
+	done := b.submitAgentRun(context.Background(), chatId, prompt, reporter)
+	go func() {
+		outcome := <-done
+		if outcome.Err != nil {
+			reporter.sendMsg(context.Background(), fmt.Sprintf("❌ Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v", outcome.Result.RunID, outcome.Result.Reason, outcome.Err))
+		}
+	}()
+}
+
+// submitAgentRun 同步登记会话票据，再异步运行，避免 goroutine 调度改变接收顺序。
+func (b *FeishuBot) submitAgentRun(ctx context.Context, chatID, prompt string, reporter engine.Reporter) <-chan engine.Outcome {
+	session := ctxpkg.GlobalSessionMgr.GetOrCreate(chatID, b.workDir)
+	eng := b.factory(session)
+	return eng.Start(ContextWithReporter(ctx, reporter), session, prompt, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
 }
 
 // ==========================================
@@ -130,7 +131,9 @@ type FeishuReporter struct {
 	chatId string
 }
 
-func (r *FeishuReporter) sendMsg(text string) {
+func (r *FeishuReporter) sendMsg(ctx context.Context, text string) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	textContent := map[string]string{
 		"text": text,
 	}
@@ -144,25 +147,25 @@ func (r *FeishuReporter) sendMsg(text string) {
 			Content(contentStr).
 			Build()).
 		Build()
-	_, _ = r.client.Im.Message.Create(context.Background(), msgReq)
+	_, _ = r.client.Im.Message.Create(ctx, msgReq)
 }
 
 func (r *FeishuReporter) OnThinking(ctx context.Context) {
-	r.sendMsg("🤔 模型正在慢思考 (Thinking)...")
+	r.sendMsg(ctx, "🤔 模型正在慢思考 (Thinking)...")
 }
 
 func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
-	r.sendMsg(fmt.Sprintf("🛠️ **正在执行工具**：`%s`\n参数：`%s`", toolName, args))
+	r.sendMsg(ctx, fmt.Sprintf("🛠️ **正在执行工具**：`%s`\n参数：`%s`", toolName, args))
 }
 func (r *FeishuReporter) OnToolResult(ctx context.Context, toolName string, result string, isError bool) {
 	if isError {
-		r.sendMsg(fmt.Sprintf("⚠️ **执行报错** (%s)：\n%s", toolName, result))
+		r.sendMsg(ctx, fmt.Sprintf("⚠️ **执行报错** (%s)：\n%s", toolName, result))
 	} else {
-		r.sendMsg(fmt.Sprintf("✅ **执行成功** (%s)", toolName))
+		r.sendMsg(ctx, fmt.Sprintf("✅ **执行成功** (%s)", toolName))
 	}
 }
 func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
-	r.sendMsg(content)
+	r.sendMsg(ctx, content)
 }
 
 // 确保 FeishuReporter 实现了 Reporter 接口

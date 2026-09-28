@@ -11,6 +11,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -80,68 +81,77 @@ func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 	return defs
 }
 
-func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-	// 【埋点 5】：开启工具执行的 Span
+// CanRunConcurrently 仅信任已装配工具的显式只读声明。
+func (r *registryImpl) CanRunConcurrently(name string) bool {
+	tool, ok := r.tools[name].(interface{ ReadOnly() bool })
+	return ok && tool.ReadOnly()
+}
+
+// detailedTool 在不改变 BaseTool 的前提下提供结构化执行元数据。
+type detailedTool interface {
+	ExecuteDetailed(context.Context, json.RawMessage) (string, schema.ToolMetadata, error)
+}
+
+func cancelledResult(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已中断: %v", ctx.Err()), IsError: true,
+		ToolMetadata: schema.ToolMetadata{TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Cancelled: errors.Is(ctx.Err(), context.Canceled)}}
+}
+
+func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (result schema.ToolResult) {
 	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
 	span.AddAttribute("tool_name", call.Name)
-	// 将 JSON 参数存入以备调试
 	span.AddAttribute("arguments", string(call.Arguments))
-	defer span.EndSpan() // 无论成功失败，确保结束
-
-	if err := ctx.Err(); err != nil {
-		return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+	result.ToolCallID = call.ID
+	defer func() {
+		if ctx.Err() != nil {
+			result.IsError = true
+			result.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+			result.Cancelled = errors.Is(ctx.Err(), context.Canceled)
+		}
+		if len(result.Output) > maxOutputBytes {
+			result.Output = outputText([]byte(result.Output[:maxOutputBytes]), true)
+			result.Truncated = true
+		}
+		span.AddAttribute("output_preview", truncate(result.Output, 200))
+		span.AddAttribute("is_error", result.IsError)
+		span.EndSpan()
+	}()
+	if ctx.Err() != nil {
+		return cancelledResult(ctx, call)
 	}
-
-	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
 	if !exists {
-		errMsg := fmt.Sprintf("Error: 系统中不存在名为 '%s' 的工具。", call.Name)
-		return schema.ToolResult{
-			ToolCallID: call.ID,
-			Output:     errMsg,
-			IsError:    true, // 标记为错误，模型看到后会尝试纠正
-		}
+		result.IsError = true
+		result.Output = fmt.Sprintf("系统中不存在名为 %q 的工具", call.Name)
+		return result
 	}
-
-	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
-	for _, mw := range r.middlewares {
-		if err := ctx.Err(); err != nil {
-			return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+	for _, middleware := range r.middlewares {
+		if ctx.Err() != nil {
+			return cancelledResult(ctx, call)
 		}
-		allowed, reason := mw(ctx, call)
+		allowed, reason := middleware(ctx, call)
 		if !allowed {
-			log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
-			return schema.ToolResult{
-				ToolCallID: call.ID,
-				Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
-				IsError:    true, // 必须返回 Error，强制大模型阅读拒绝理由
-			}
+			result.IsError = true
+			result.Output = "执行被系统拦截。原因: " + reason
+			return result
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return schema.ToolResult{ToolCallID: call.ID, Output: fmt.Sprintf("工具调用已取消: %v", err), IsError: true}
+	if ctx.Err() != nil {
+		return cancelledResult(ctx, call)
 	}
-	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
-	output, err := tool.Execute(ctx, call.Arguments)
-	// 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+	var err error
+	if detailed, ok := tool.(detailedTool); ok {
+		result.Output, result.ToolMetadata, err = detailed.ExecuteDetailed(ctx, call.Arguments)
+	} else {
+		result.Output, err = tool.Execute(ctx, call.Arguments)
+	}
 	if err != nil {
-		errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
-		if output != "" {
-			errMsg = output + "\n" + errMsg
-		}
-		return schema.ToolResult{
-			ToolCallID: call.ID,
-			Output:     errMsg,
-			IsError:    true,
-		}
+		result.IsError = true
+		result.TimedOut = result.TimedOut || errors.Is(err, context.DeadlineExceeded)
+		result.Cancelled = result.Cancelled || errors.Is(err, context.Canceled)
+		result.Output = fmt.Sprintf("工具 %s 执行失败: %v\n%s", call.Name, err, result.Output)
 	}
-	// 可以只截取输出的前 200 字符放入 Trace，防止 Trace 文件过度膨胀
-	span.AddAttribute("output_preview", truncate(output, 200))
-	return schema.ToolResult{
-		ToolCallID: call.ID,
-		Output:     output,
-		IsError:    false,
-	}
+	return result
 }
 
 func truncate(s string, max int) string {

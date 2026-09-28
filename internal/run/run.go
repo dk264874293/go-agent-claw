@@ -9,8 +9,10 @@ import (
 
 // Options 定义单次运行的硬性轮数和时间上限。
 type Options struct {
-	MaxTurns int
-	Timeout  time.Duration
+	MaxTurns           int
+	Timeout            time.Duration
+	ToolTimeout        time.Duration
+	MaxConcurrentTools int
 }
 
 // Status 表示运行的技术状态，不代表用户任务已通过业务验收。

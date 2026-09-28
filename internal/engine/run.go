@@ -4,18 +4,19 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
 // Run 执行一次有轮数与总时限的任务，并返回可判别的终止原因。
-func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter, opts runpkg.Options) (result runpkg.Result, runErr error) {
-	if ctx == nil || session == nil || opts.MaxTurns <= 0 || opts.Timeout <= 0 {
+func (e *AgentEngine) runQueued(ctx context.Context, session *ctxpkg.Session, reporter Reporter, opts runpkg.Options, prompt *string, ticket *ctxpkg.RunTicket) (result runpkg.Result, runErr error) {
+	defer ticket.Release()
+	if ctx == nil || session == nil || opts.MaxTurns <= 0 || opts.Timeout <= 0 || opts.ToolTimeout < 0 || opts.MaxConcurrentTools < 0 {
 		return result, runpkg.ErrInvalidOptions
 	}
 	id, err := runpkg.NewID()
@@ -25,6 +26,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 	result = runpkg.Result{RunID: id, SessionID: session.ID, StartedAt: time.Now()}
 	runCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
+	runCtx = tools.WithExecutionOptions(runCtx, tools.ExecutionOptions{Timeout: opts.ToolTimeout, MaxConcurrent: opts.MaxConcurrentTools})
 	runCtx, rootSpan := observability.StartSpan(runCtx, "Agent.Run")
 	rootSpan.AddAttribute("RunID", id)
 	rootSpan.AddAttribute("SessionID", session.ID)
@@ -50,6 +52,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 		return stop(runpkg.StatusBudgetExhausted, runpkg.ReasonTimeLimit, runpkg.ErrTimeLimit)
 	}
 
+	if err := ticket.Wait(runCtx); err != nil {
+		return stopContext()
+	}
+	if prompt != nil {
+		session.Append(schema.Message{Role: schema.RoleUser, Content: *prompt})
+	}
+	injector := NewReminderInjector()
 	systemMsg := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode).Build()
 	for {
 		if runCtx.Err() != nil {
@@ -147,42 +156,28 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 			return stop(runpkg.StatusSucceeded, runpkg.ReasonCompleted, nil)
 		}
 
-		results := make([]schema.ToolResult, len(actionResp.ToolCalls))
-		observations := make([]schema.Message, len(actionResp.ToolCalls))
-		var wg sync.WaitGroup
-		for i, call := range actionResp.ToolCalls {
+		for _, call := range actionResp.ToolCalls {
 			if reporter != nil {
 				reporter.OnToolCall(turnCtx, call.Name, string(call.Arguments))
 			}
-			wg.Add(1)
-			go func(idx int, toolCall schema.ToolCall) {
-				defer wg.Done()
-				var toolResult schema.ToolResult
-				if err := runCtx.Err(); err != nil {
-					toolResult = schema.ToolResult{ToolCallID: toolCall.ID, Output: err.Error(), IsError: true}
-				} else {
-					toolResult = e.registry.Execute(turnCtx, toolCall)
-				}
-				if toolResult.IsError {
-					toolResult.Output = e.recovery.AnalyzeAndInject(toolCall.Name, toolResult.Output)
-				}
-				results[idx] = toolResult
-				observations[idx] = schema.Message{Role: schema.RoleUser, Content: toolResult.Output, ToolCallID: toolCall.ID}
-			}(i, call)
 		}
-		wg.Wait()
+		results := tools.ExecuteBatch(turnCtx, e.registry, actionResp.ToolCalls)
+		observations := make([]schema.Message, len(results))
+		for i := range results {
+			if results[i].IsError {
+				results[i].Output = e.recovery.AnalyzeAndInject(actionResp.ToolCalls[i].Name, results[i].Output)
+			}
+			meta := results[i].ToolMetadata
+			observations[i] = schema.Message{Role: schema.RoleUser, Content: results[i].Output, ToolCallID: actionResp.ToolCalls[i].ID, ToolMetadata: &meta}
+		}
 		for i, call := range actionResp.ToolCalls {
 			if reporter != nil {
-				preview := results[i].Output
-				if len(preview) > 200 {
-					preview = preview[:200] + "... (已截断)"
-				}
-				reporter.OnToolResult(turnCtx, call.Name, preview, results[i].IsError)
+				reporter.OnToolResult(turnCtx, call.Name, toolPreview(results[i].Output), results[i].IsError)
 			}
 		}
 		session.Append(observations...)
 		for i, call := range actionResp.ToolCalls {
-			if reminder := e.injector.CheckAndInject(call, results[i]); reminder != nil {
+			if reminder := injector.CheckAndInject(call, results[i]); reminder != nil {
 				session.Append(*reminder)
 			}
 		}
@@ -191,4 +186,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 			return stopContext()
 		}
 	}
+}
+
+func toolPreview(output string) string {
+	if len(output) > 200 {
+		return strings.ToValidUTF8(output[:200], "") + "... (已截断)"
+	}
+	return output
 }

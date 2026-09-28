@@ -22,7 +22,6 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
-	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
@@ -116,13 +115,13 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	eng := engine.NewAgentEngine(trackedProvider, registry, false, false)
 
 	// 4. 让 Agent 开始干活
-	session.Append(schema.Message{Role: schema.RoleUser, Content: tc.TaskPrompt})
+
 	// 我们传入一个空的 reporter 屏蔽普通日志，防止刷屏
 	maxTurns := tc.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
-	result, err := eng.Run(ctx, session, nil, runpkg.Options{MaxTurns: maxTurns, Timeout: 5 * time.Minute})
+	result, err := eng.Submit(ctx, session, tc.TaskPrompt, nil, runpkg.Options{MaxTurns: maxTurns, Timeout: 5 * time.Minute})
 
 	if err != nil {
 		return TestResult{TestCaseID: tc.ID, Passed: false, ErrorMsg: fmt.Sprintf("Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v", result.RunID, result.Reason, err)}
@@ -139,7 +138,7 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 		return TestResult{
 			TestCaseID:   tc.ID,
 			Passed:       false,
-			TotalCostCNY: session.TotalCostCNY,
+			TotalCostCNY: session.UsageSnapshot().TotalCostCNY,
 			DurationMs:   duration,
 			ErrorMsg:     fmt.Sprintf("验证脚本执行失败: %s", string(out)),
 		}
@@ -148,7 +147,7 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	return TestResult{
 		TestCaseID:   tc.ID,
 		Passed:       true,
-		TotalCostCNY: session.TotalCostCNY,
+		TotalCostCNY: session.UsageSnapshot().TotalCostCNY,
 		DurationMs:   duration,
 	}
 }

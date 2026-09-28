@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
@@ -18,7 +17,6 @@ type AgentEngine struct {
 	PlanMode       bool                    // 暴露给外部的计划模式开关
 	compactor      *ctxpkg.Compactor       // 压缩器实例
 	recovery       *ctxpkg.RecoveryManager // 自愈管理器
-	injector       *ReminderInjector       // 提醒注入器
 }
 
 // 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
@@ -31,7 +29,6 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 		// 并保护最近的 6 条消息（大约两轮 Turn 的交互）
 		compactor: ctxpkg.NewCompactor(300000, 10),
 		recovery:  ctxpkg.NewRecoveryManager(), // 初始化 Recovery }
-		injector:  NewReminderInjector(),       // 【初始化注入器】
 	}
 }
 
@@ -63,6 +60,9 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 	turnCount := 0
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		turnCount++
 		if turnCount > maxSubTurns {
 			return "", fmt.Errorf("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns)
@@ -79,6 +79,12 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 			return "", fmt.Errorf("子智能体推理失败: %w", err)
 		}
 
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if actionResp == nil || actionResp.Role != schema.RoleAssistant {
+			return "", fmt.Errorf("子任务模型响应无效")
+		}
 		contextHistory = append(contextHistory, *actionResp)
 
 		// 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
@@ -87,46 +93,25 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 			return actionResp.Content, nil
 		}
 
-		// 执行只读工具的并发循环
-		observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
-		var wg sync.WaitGroup
-
-		for i, toolCall := range actionResp.ToolCalls {
-			wg.Add(1)
-			go func(idx int, call schema.ToolCall) {
-				defer wg.Done()
-
-				// 【可视化的关键】：让终端用户看到 Subagent 正在干嘛
-				var r Reporter
-				if reporter != nil {
-					r = reporter.(Reporter)
-					r.OnToolCall(ctx, fmt.Sprintf("[Subagent] %s", call.Name), string(call.Arguments))
-				}
-
-				result := readOnlyRegistry.Execute(ctx, call)
-
-				finalOutput := result.Output
-				if result.IsError {
-					finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-				}
-
-				if reporter != nil {
-					display := finalOutput
-					if len(display) > 200 {
-						display = display[:200] + "... (已截断)"
-					}
-					r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", call.Name), display, result.IsError)
-				}
-
-				observationMsgs[idx] = schema.Message{
-					Role:       schema.RoleUser,
-					Content:    finalOutput,
-					ToolCallID: call.ID,
-				}
-			}(i, toolCall)
+		r, _ := reporter.(Reporter)
+		for _, call := range actionResp.ToolCalls {
+			if r != nil {
+				r.OnToolCall(ctx, "[Subagent] "+call.Name, string(call.Arguments))
+			}
 		}
-
-		wg.Wait()
+		results := tools.ExecuteBatch(ctx, readOnlyRegistry, actionResp.ToolCalls)
+		observationMsgs := make([]schema.Message, len(results))
+		for i, result := range results {
+			call := actionResp.ToolCalls[i]
+			if result.IsError {
+				result.Output = e.recovery.AnalyzeAndInject(call.Name, result.Output)
+			}
+			if r != nil {
+				r.OnToolResult(ctx, "[Subagent] "+call.Name, toolPreview(result.Output), result.IsError)
+			}
+			meta := result.ToolMetadata
+			observationMsgs[i] = schema.Message{Role: schema.RoleUser, Content: result.Output, ToolCallID: call.ID, ToolMetadata: &meta}
+		}
 		contextHistory = append(contextHistory, observationMsgs...)
 	}
 }

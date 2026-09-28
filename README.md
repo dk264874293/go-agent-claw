@@ -7,9 +7,11 @@
 - **ReAct 主循环**：`Think → Act → Observe` 循环驱动，模型自主决定何时调用工具、何时宣告任务完成。
 - **双阶段推理（Thinking 模式）**：开启后每轮发两次 LLM 调用——先剥夺工具强制规划，再带工具精准行动。
 - **会话与工作记忆**：`Session` 在进程内维护历史，主循环只发送最近 20 条消息作为短期工作记忆；窗口滑动时自动保住 `ToolCall↔ToolResult` 配对与首条 user 消息的 API 校验。
-- **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；当前入口使用最多 20 轮、总超时 5 分钟，超时依赖 Provider 和工具响应 context。
+- **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；当前入口使用最多 20 轮、总超时 5 分钟（含排队），单工具默认 30 秒。自定义工具仍须响应 context。
 - **上下文压缩器（Compactor）**：发给模型前对超长上下文做掩码/截断，保护最近消息不被远古日志吃光 token 预算。
-- **并发工具执行**：同一轮的多个工具调用在 goroutine 中并发执行，各自写入预分配切片的不同槽位，无锁聚合。
+- **会话调度**：同一 Session 的用户消息和整次运行按登记顺序执行，等待可取消；不同 Session 可并发。
+- **输出与进程回收**：文件有界读取、Shell 有界缓冲保留前 8000 字节并标记截断；Linux/macOS 下取消及正常结束清理同组后台进程。主动脱离进程组仍需后续隔离治理。
+- **并发工具执行**：连续且显式声明只读的工具默认最多 4 个并发；写入、Shell 和子任务按顺序执行。主子任务共用调度器，结果按原顺序回写。
 - **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出探索型子任务，在最多 10 轮内搜集信息并返回摘要；当前子任务仍有通用 Bash，尚无可靠的只读隔离。
 - **错误自愈（RecoveryManager）**：工具报错在送回模型前自动诊断并注入"救援提示"，引导模型自我修正。
 - **死循环探测（ReminderInjector）**：对连续重复的工具调用做指纹识别，触发时注入严厉提醒打破局部执念。
@@ -37,7 +39,7 @@ internal/tools/             — BaseTool 接口、支持中间件的 Registry、
                               read/write/edit_file/bash 工具、子智能体工具
 internal/observability/     — CostTracker（包裹 provider，为 Session 计费）、Span 链路追踪，
                               导出到 <workDir>/.claw/traces
-internal/feishu/            — 飞书/Lark 机器人 + 审批流（目前未接入 main.go）
+internal/feishu/            — 飞书/Lark 机器人 + 审批流（入口为独立的 cmd/agentops）
 ```
 
 ### 分层规则
@@ -90,7 +92,7 @@ go test ./internal/...
 go test ./cmd/claw
 ```
 
-测试覆盖工作记忆、M1 运行边界、工具错误反馈及 CLI 运行结果；这些测试使用 Mock Provider，不调用真实 API。
+测试覆盖工作记忆、M1 运行边界、M2 排队与取消、工具调度、输出上限、Shell 进程回收、飞书提交/审批及账单快照；这些测试使用 Mock Provider，不调用真实 API。
 
 ## 🧠 工作原理
 
@@ -108,7 +110,8 @@ readOnlyRegistry：read_file / bash（专供子智能体）
     ↓
 AgentEngine(trackedProvider, registry, enableThinking, planMode)
     ↓
-eng.Run(ctx, sess, reporter, run.Options{MaxTurns: 20, Timeout: 5m}) → ReAct 主循环
+eng.Submit(ctx, sess, prompt, reporter, run.Options{MaxTurns: 20, Timeout: 5*time.Minute})
+  → Session 排队 → 追加用户消息 → ReAct 主循环
 ```
 
 ### 2. ReAct 主循环（internal/engine/loop.go）
@@ -119,7 +122,7 @@ eng.Run(ctx, sess, reporter, run.Options{MaxTurns: 20, Timeout: 5m}) → ReAct �
 2. **压缩**：Compactor 检查字符总量，超标时对早期消息掩码化、超大日志掐头去尾。
 3. **Thinking 阶段**（可选）：不带工具调用一次 LLM 强制规划，思考内容追加到内存 Session。
 4. **Action 阶段**：带工具列表调用 LLM，拿到工具调用请求。
-5. **并发执行**：所有工具调用在 goroutine 中并发跑，错误经 RecoveryManager 注入救援提示。
+5. **工具调度**：连续只读调用限流并发，其他工具形成顺序屏障；错误经 RecoveryManager 注入救援提示，截断/超时/取消元数据保留在 Observation。
 6. **Observation**：结果以携带 `ToolCallID` 的 user 消息回写 Session；ReminderInjector 探测死循环。
 7. 模型不再请求工具时，Run 标为技术性完成；达到轮数或总超时时返回对应终止原因。技术性完成不代表任务经过验收。
 
@@ -140,7 +143,7 @@ eng.Run(ctx, sess, reporter, run.Options{MaxTurns: 20, Timeout: 5m}) → ReAct �
 主智能体调用 `spawn_subagent` 时，引擎拉起一个不依赖外部 Session 的一次性受限循环：
 
 - 挂载 `readOnlyRegistry`（read_file + bash）；通用 Bash 仍可写入工作区外文件，当前并不真正只读；
-- 最多 10 个 Turn，超时强制召回；
+- 最多 10 个 Turn，继承父任务 context、工具超时和并发配置；
 - System Prompt 严厉警告必须用工具找答案、禁止凭空捏造；
 - 不再调用工具即视为汇报完成，返回纯文本摘要给主智能体。
 
@@ -169,7 +172,7 @@ observability.TestCase{
 
 ## 💬 飞书机器人（独立入口）
 
-`cmd/agentops` 是可编译的独立飞书 HTTP 服务，使用 `internal/feishu/` 的事件处理、Reporter 和审批管理。它与 CLI 分开启动；当前审批等待没有超时或 context 取消，尚不适合多用户试点。
+`cmd/agentops` 是可编译的独立飞书 HTTP 服务，使用 `internal/feishu/` 的事件处理、Reporter 和审批管理。它与 CLI 分开启动；同会话运行已串行，审批等待受工具超时和 context 取消控制；全局队列容量、审批鉴权与跨会话隔离仍待实现，尚不适合多用户试点。
 
 ## 🔧 扩展指南
 
@@ -214,11 +217,11 @@ registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
 
 ## ⚠️ 已知坑点
 
-- **并发写 Session**：`Session` 由 `sync.RWMutex` 保护；并发工具执行时循环变量必须作为函数参数传入 goroutine，避免闭包捕获陷阱。
+- **并发写 Session**：通过 `Submit`/`Start` 提交任务，消息追加也必须在排队边界内；历史和账单使用锁保护，账单通过 `UsageSnapshot()` 读取。
 - **包名怪癖**：`internal/eval/benchmark.go` 位于 `internal/eval/` 目录却声明 `package observability`。导入路径是 `internal/eval`，但引用时写作 `observability.*`。
 - **GLM 消息校验**：改动截断逻辑时必须保住 `ToolCall↔ToolResult` 配对，且首条非 system 消息必须是普通 user 消息。
 - **引擎构造签名**：`NewAgentEngine(provider, registry, enableThinking, planMode)`——thinking 阶段每轮发两次 LLM 调用（先不带工具做规划，再带工具行动）。
-- **飞书入口**：`cmd/agentops` 是独立 HTTP 服务；CLI 不会启动它。其审批等待仍缺少超时与 context 取消。
+- **飞书入口**：`cmd/agentops` 是独立 HTTP 服务；CLI 不会启动它。审批等待已支持超时与 context 取消，审批身份校验仍待实现。
 
 ## MIT 许可
 

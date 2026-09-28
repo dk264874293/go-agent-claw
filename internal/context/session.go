@@ -2,58 +2,70 @@
 package context
 
 import (
-    "sync"
-    "time"
+	"sync"
+	"time"
 
-    "github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
 // Session 代表了一次持续的人机交互过程。它负责维护该会话的完整历史。
 type Session struct {
-    ID        string
-    WorkDir   string // 该会话绑定的物理工作区
-    CreatedAt time.Time
-    UpdatedAt time.Time
+	ID        string
+	WorkDir   string // 该会话绑定的物理工作区
+	CreatedAt time.Time
+	UpdatedAt time.Time
 
-    // 【新增】用于统计该 Session 累计消耗的资源
-    TotalPromptTokens     int
-    TotalCompletionTokens int
-    TotalCostCNY          float64
+	// 【新增】用于统计该 Session 累计消耗的资源
+	usage    UsageSnapshot
+	runQueue []*RunTicket
 
-    // 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
-    history []schema.Message
-    mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
+	// 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
+	history []schema.Message
+	mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
 }
 
 // RecordUsage 是一个给外部 Tracker 调用的辅助方法，用于累加账单
 func (s *Session) RecordUsage(prompt int, completion int, cost float64) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.TotalPromptTokens += prompt
-    s.TotalCompletionTokens += completion
-    s.TotalCostCNY += cost
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage.TotalPromptTokens += prompt
+	s.usage.TotalCompletionTokens += completion
+	s.usage.TotalCostCNY += cost
+}
+
+// UsageSnapshot 是可安全交给调用方的账单副本。
+type UsageSnapshot struct {
+	TotalPromptTokens     int
+	TotalCompletionTokens int
+	TotalCostCNY          float64
+}
+
+func (s *Session) UsageSnapshot() UsageSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.usage
 }
 
 func NewSession(id string, workDir string) *Session {
-    return &Session{
-        ID:        id,
-        WorkDir:   workDir,
-        CreatedAt: time.Now(),
-        UpdatedAt: time.Now(),
-        history:   make([]schema.Message, 0),
-    }
+	return &Session{
+		ID:        id,
+		WorkDir:   workDir,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		history:   make([]schema.Message, 0),
+	}
 }
 
 // Append 线程安全地向 Session 中追加消息
 func (s *Session) Append(msgs ...schema.Message) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.history = append(s.history, msgs...)
-    s.UpdatedAt = time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = append(s.history, cloneMessages(msgs)...)
+	s.UpdatedAt = time.Now()
 
-    // 【持久化预留点】：在真实的工业级实现中（如 Claude Code），
-    // 我们会在这里将 s.history 以 JSONL 的格式 Append 到 workDir/.claw/sessions/xxx.jsonl 中。
-    // s.SaveToDisk()
+	// 【持久化预留点】：在真实的工业级实现中（如 Claude Code），
+	// 我们会在这里将 s.history 以 JSONL 的格式 Append 到 workDir/.claw/sessions/xxx.jsonl 中。
+	// s.SaveToDisk()
 }
 
 // MessageCount 返回会话历史中的消息总数（用户输入、模型回复与工具结果均计入）
@@ -73,7 +85,6 @@ func (s *Session) ResetHistory() {
 	s.UpdatedAt = time.Now()
 }
 
-
 // syntheticContextNotice 是方案 A 兜底时注入的合成 user 前缀。
 // 它不进入 Session 历史，每次开窗时现做，只为满足“会话以 user 开场”的 API 校验。
 const syntheticContextNotice = "[系统提示] 更早的对话历史（含最初的任务指令）已被截断。以下是最近的工作记录，请据此继续执行当前任务，不要重复已完成的步骤。"
@@ -88,7 +99,7 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 	if total <= limit || limit <= 0 {
 		// 如果历史总量小于限制，或者不设限，全量返回 (需要深拷贝以防外部修改)
 		res := make([]schema.Message, total)
-		copy(res, s.history)
+		copy(res, cloneMessages(s.history))
 		return res
 	}
 
@@ -115,7 +126,7 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 	if start-backtrack <= maxBacktrack {
 		// 方案 B：小幅回退补数，窗口略超 limit 条
 		res := make([]schema.Message, total-backtrack)
-		copy(res, s.history[backtrack:])
+		copy(res, cloneMessages(s.history[backtrack:]))
 		return res
 	}
 
@@ -132,8 +143,28 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 			Content: syntheticContextNotice,
 		})
 	}
-	res = append(res, s.history[head:]...)
+	res = append(res, cloneMessages(s.history[head:])...)
 	return res
+}
+
+func cloneMessages(messages []schema.Message) []schema.Message {
+	copies := make([]schema.Message, len(messages))
+	for i, message := range messages {
+		copies[i] = message
+		copies[i].ToolCalls = append([]schema.ToolCall(nil), message.ToolCalls...)
+		for j := range copies[i].ToolCalls {
+			copies[i].ToolCalls[j].Arguments = append([]byte(nil), message.ToolCalls[j].Arguments...)
+		}
+		if message.Usage != nil {
+			value := *message.Usage
+			copies[i].Usage = &value
+		}
+		if message.ToolMetadata != nil {
+			value := *message.ToolMetadata
+			copies[i].ToolMetadata = &value
+		}
+	}
+	return copies
 }
 
 // ==========================================
@@ -141,23 +172,23 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 // ==========================================
 
 type SessionManager struct {
-    sessions map[string]*Session
-    mu       sync.RWMutex
+	sessions map[string]*Session
+	mu       sync.RWMutex
 }
 
 var GlobalSessionMgr = &SessionManager{
-    sessions: make(map[string]*Session),
+	sessions: make(map[string]*Session),
 }
 
 // GetOrCreate 获取或创建一个会话
 func (sm *SessionManager) GetOrCreate(id string, workDir string) *Session {
-    sm.mu.Lock()
-    defer sm.mu.Unlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 
-    if sess, exists := sm.sessions[id]; exists {
-        return sess
-    }
-    sess := NewSession(id, workDir)
-    sm.sessions[id] = sess
-    return sess
+	if sess, exists := sm.sessions[id]; exists {
+		return sess
+	}
+	sess := NewSession(id, workDir)
+	sm.sessions[id] = sess
+	return sess
 }

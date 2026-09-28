@@ -56,7 +56,7 @@ gofmt -w <修改过的.go文件>         # 格式化本次修改的 Go 文件
 
 - 不要使用 `go build ./...`：模块根目录下的 `workspace/` 是演示和运行产物目录，可能包含不能参与正式构建的草稿代码。
 - 不要在未得到明确要求时运行 `go run ./cmd/bench`，它会调用真实 LLM API 并产生费用。
-- 当前自动化测试覆盖 `internal/context`、`internal/engine`、`internal/tools` 与 CLI 的 M1 路径；修改其他核心模块时必须补充相应测试。
+- 当前自动化测试覆盖 `internal/context`、`internal/engine`、`internal/tools`、`internal/observability`、`internal/feishu` 与 CLI 的 M1/M2 路径；修改其他核心模块时必须补充相应测试。
 - 仓库当前要求 Go 1.25 或更高版本。
 - REPL 内置 `/help`、`/exit`、`/cost`、`/status`、`/clear`。独占一行的 `"""` 用于开始或结束多行输入。
 
@@ -67,12 +67,12 @@ cmd/claw
   -> Provider
   -> CostTracker
   -> Session
-  -> AgentEngine.Run
+  -> AgentEngine.Submit（会话排队、追加消息、运行）
        -> PromptComposer（核心提示词 + AGENTS.md + 本地 Skills）
        -> GetWorkingMemory(20)
        -> Compactor
        -> Provider.Generate
-       -> Registry.Execute（同一轮工具并发执行）
+       -> ExecuteBatch -> Registry.Execute（只读限流并发，其他工具顺序执行）
        -> ToolResult 回写 Session
        -> 下一轮推理或结束
 ```
@@ -118,10 +118,10 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### 并发工具执行
 
-- 同一轮工具调用由 goroutine 并发执行。
-- 每个 goroutine 只能写预分配结果切片中属于自己的索引。
-- 循环索引和 `ToolCall` 必须作为 goroutine 参数传入，不要依赖闭包捕获。
-- `Session` 的历史和账单由同一把 `sync.RWMutex` 保护；新增 Session 字段时应通过加锁方法访问。
+- 只有显式声明 `ReadOnly()` 的连续工具调用可并发，默认最多 4 个 worker；写入、Shell、子任务和未知工具构成顺序屏障。主任务和子任务共用调度器。
+- 每个 worker 只能写预分配结果切片中属于自己的索引，循环边界通过 goroutine 参数传入。
+- 所有入口通过 `Submit`/`Start` 把追加消息和整次运行纳入 Session FIFO 队列；等待可取消，排队时间计入总超时。不要在提交前自行追加消息。
+- `Session` 的历史、运行票据和账单由同一把 `sync.RWMutex` 保护；账单通过 `UsageSnapshot()` 读取，历史返回嵌套数据的深拷贝。新增字段通过加锁方法访问。
 - Registry 当前不支持运行期间并发注册工具或中间件，工具装配必须在 `Run` 前完成。
 
 ### Provider
@@ -137,7 +137,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### P0：工具不是沙箱
 
-- `read_file`、`write_file`、`edit_file` 目前只使用 `filepath.Join`，没有阻止 `..`、绝对路径或符号链接逃逸。
+- `read_file` 已使用 `os.Root` 约束路径且仅接受常规文件；`write_file`、`edit_file` 仍只使用 `filepath.Join`，尚未建立对应写入边界。统一文件权限层仍属于阶段 2。
 - `bash` 只是把 `cmd.Dir` 设置为 WorkDir，仍能访问和修改进程权限允许的任意位置。
 - CLI 主 Registry 没有挂载审批或危险命令拦截中间件。
 - 子智能体所谓的 `readOnlyRegistry` 包含任意 `bash`，因此并不真正只读。
@@ -146,13 +146,15 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### P0：主 Agent 的资源限制尚未完整
 
-`AgentEngine.Run` 已有 `MaxTurns` 和基于 context 的总超时，并由 Mock Provider 验证；CLI 和飞书入口目前使用固定的 20 轮、5 分钟。Token、费用、工具并发仍无硬性上限，Shell 后代进程及不响应 context 的工具仍可能超过时限。ReminderInjector 只是提示词干预，不能作为资源限制。
+`AgentEngine.Run` 已有 `MaxTurns` 和基于 context 的总超时，并由 Mock Provider 验证；CLI 和飞书入口目前使用固定的 20 轮、5 分钟。单工具默认超时 30 秒（包含审批等待），只读批次默认最多 4 个 worker，可通过 Run Options 修改。Token、费用尚无硬性上限；不响应 context 的自定义工具、阻塞的文件系统 I/O 和主动脱离 Shell 进程组的程序仍需后续治理。ReminderInjector 只是提示词干预，不能作为资源限制。
 
-### P1：工具输出与取消链路尚不完整
+### 工具输出与取消约定
 
 - 主循环现将 RecoveryManager 增强后的错误写入 Observation；`bash` 非零退出和子任务失败会标记为错误；ReminderInjector 检查同轮全部工具结果。相关 Mock、Registry 和 BashTool 测试已补齐。
-- `read_file` 使用 `io.ReadAll` 后才截断，`bash` 使用 `CombinedOutput` 后才截断；两者都不能真正防止超大输入导致内存占用。
-- 飞书审批等待尚不响应 context，Shell 后代进程回收与不合作工具退出仍待 M2 实现。
+- `read_file` 最多读取 8001 字节以检测截断；`bash` 持续排空输出，仅保留前 8000 字节。Registry 限制最终工具结果长度，但自定义工具内部仍须自行限制分配。
+- `ToolResult` 和 Observation 保留 `Truncated`、`TimedOut`、`Cancelled`；超时和取消必须标记 `IsError`。
+- Shell 在 Linux/macOS 使用独立进程组，取消和正常结束都清理同组后台进程；WaitDelay 限制输出管道等待。其他平台明确返回不支持。
+- 审批等待响应工具/运行 context，取消时清理登记；飞书 Reporter 请求使用传入 context，额外限制为 3 秒。
 
 修复这些行为时要以 `ToolResult.IsError` 的语义一致性为准，并添加 Registry、BashTool 和 Engine 级测试。
 
@@ -167,8 +169,8 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### P1：飞书并发与审批
 
-- 同一 chat 的多条消息可以同时启动多个 Engine，并交叉写入同一个 Session；单次 Append 加锁不能保证整轮消息顺序。
-- 审批等待没有超时和 context 取消，无人处理时会永久阻塞。
+- 同一 chat 已按 Session 票据登记顺序执行，不同 chat 可并发；全局任务队列容量、事件去重和服务关闭治理尚待实现。
+- 审批已支持取消、超时和重复处理不阻塞；审批主体鉴权、跨会话隔离和持久化尚待实现。
 - 飞书 HTTP 服务位于 `cmd/agentops`，与 CLI 是两个独立入口；不要在 `cmd/claw` 中顺手启用它。
 
 ### P2：默认行为和仓库卫生
