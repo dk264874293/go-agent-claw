@@ -7,7 +7,7 @@
 - **ReAct 主循环**：`Think → Act → Observe` 循环驱动，模型自主决定何时调用工具、何时宣告任务完成。
 - **双阶段推理（Thinking 模式）**：开启后每轮发两次 LLM 调用——先剥夺工具强制规划，再带工具精准行动。
 - **会话与工作记忆**：`Session` 在进程内维护历史，主循环只发送最近 20 条消息作为短期工作记忆；窗口滑动时自动保住 `ToolCall↔ToolResult` 配对与首条 user 消息的 API 校验。
-- **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；当前入口使用最多 20 轮、总超时 5 分钟（含排队），单工具默认 30 秒。自定义工具仍须响应 context。
+- **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；默认最多 20 轮、总超时 5 分钟（含排队）、单工具 30 秒、Token 预算 100000，每次模型请求最多输出 4096 Token。自定义工具仍须响应 context。
 - **上下文压缩器（Compactor）**：发给模型前对超长上下文做掩码/截断，保护最近消息不被远古日志吃光 token 预算。
 - **会话调度**：同一 Session 的用户消息和整次运行按登记顺序执行，等待可取消；不同 Session 可并发。
 - **输出与进程回收**：文件有界读取、Shell 有界缓冲保留前 8000 字节并标记截断；Linux/macOS 下取消及正常结束清理同组后台进程。主动脱离进程组仍需后续隔离治理。
@@ -15,8 +15,8 @@
 - **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出探索型子任务，在最多 10 轮内搜集信息并返回摘要；当前子任务仍有通用 Bash，尚无可靠的只读隔离。
 - **错误自愈（RecoveryManager）**：工具报错在送回模型前自动诊断并注入"救援提示"，引导模型自我修正。
 - **死循环探测（ReminderInjector）**：对连续重复的工具调用做指纹识别，触发时注入严厉提醒打破局部执念。
-- **可观测性**：`CostTracker` 记录 Token 与已配置模型的估算费用；`Span` 树形链路追踪导出到 `<workDir>/.claw/traces`。默认模型尚无价格配置。
-- **计划模式（PlanMode）**：PromptComposer 按 `planMode` 开关组装不同的系统提示词。
+- **可观测性**：`CostTracker` 记录供应商返回的 Token Usage；配置匹配价目表时计算已知费用，缺失价格或 Usage 时标记未知。每次 Run 的 Trace 按 RunID 导出到 `<workDir>/.claw/traces`，导出错误会报告。
+- **计划模式（PlanMode）**：PromptComposer 按 `planMode` 开关组装不同的系统提示词，默认关闭。
 - **技能加载（SkillLoader）**：从工作区加载 Markdown 技能文件注入系统提示词。
 - **双 Provider 支持**：OpenAI 兼容路线（智谱 GLM）与 Anthropic 兼容路线（DeepSeek），一个接口随时切换。
 - **工具中间件**：`registry.Use(...)` 可拦截工具调用，带理由拒绝，模型必须读该理由。
@@ -32,6 +32,8 @@ internal/provider/          — LLMProvider 接口 + OpenAI 兼容 (openai.go) �
                               Anthropic 兼容 (claude.go) 两套实现
 internal/engine/            — AgentEngine：有上限的 ReAct 主循环 + 子智能体的 RunSub
 internal/run/               — RunOptions、运行状态和终止原因
+internal/config/            — CLI/环境配置解析与 Run Options 转换
+internal/budget/            — 价目快照、Token/费用预留及结算
 internal/engine/            — Reporter 接口 + TerminalReporter、ReminderInjector（防死循环）
 internal/context/           — Session（历史 + 工作记忆）、Compactor、RecoveryManager、
                               PromptComposer（系统提示词、计划模式）、技能加载器
@@ -55,6 +57,7 @@ internal/feishu/            — 飞书/Lark 机器人 + 审批流（入口为独
 
 - Go 1.25+
 - CLI 需要 `OPENAI_API_KEY`；基准测试需要 `ZHIPU_API_KEY`，会真实调用 API
+- 选择其他 Provider 时分别设置 `ZHIPU_API_KEY` 或 `DEEPSEEK_API_KEY`；密钥只从环境变量读取，可选 `.env` 只补齐未设置的变量
 - 独立飞书服务需要 `ZHIPU_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`
 
 ### 构建与运行
@@ -82,8 +85,32 @@ go run ./cmd/bench
 | `-prompt` | 要交给 Agent 执行的任务描述；留空时进入 REPL | — |
 | `-dir` | Agent 运行的工作区目录路径 | 当前目录 |
 | `-session` | 当前进程内复用的会话 ID；重启后不恢复历史 | `cli_default_session` |
+| `-provider`、`-model`、`-base-url` | Provider、模型及兼容 API 地址 | `openai`、`gpt-5.6-sol`、数云网关 |
+| `-thinking`、`-plan-mode` | Thinking 和计划模式 | 均关闭 |
+| `-max-turns`、`-timeout`、`-tool-timeout`、`-max-concurrent-tools` | 轮数、总时限、工具时限、只读并发 | `20`、`5m`、`30s`、`4` |
+| `-max-total-tokens`、`-max-output-tokens` | 每 Run Token 预算、每请求输出上限 | `100000`、`4096` |
+| `-max-cost`、`-cost-currency`、`-pricing-file` | 可选费用预算、币种、显式价目表 | 均未设置 |
 
-单任务运行结束后会打印 RunID、终止原因、总耗时与 Session 累计用量；失败时退出码非零。当前费用价格表未覆盖默认模型，费用显示不能作为准确账单。
+同名 `CLAW_*` 环境变量可设置上述 Provider、模型、地址、推理和预算字段；命令行参数优先。支持的 Provider 值为 `openai`、`zhipu-openai`、`zhipu-anthropic`、`deepseek-openai`、`deepseek-anthropic`。单任务运行结束会打印 RunID、终止原因与 Session 累计用量；失败时退出码非零。Session 只存在于当前进程内。
+
+费用预算必须同时设置币种及与 Provider、地址、模型匹配的价目表。价目表由操作者提供，不内置推测价格。例如：
+
+```json
+{
+  "version": "示例版本",
+  "rates": [{
+    "provider": "openai",
+    "base_url": "https://example.invalid/v1/",
+    "model": "示例模型",
+    "currency": "USD",
+    "source": "操作者核对的价格来源",
+    "input_per_million": "1.25",
+    "output_per_million": "2.50"
+  }]
+}
+```
+
+价格为每百万 Token 的对应币种金额。金额使用整数微单位结算，每次请求向上舍入到微单位。未配置匹配价格时费用显示“未知”；不能把它当作免费。Token/费用上限控制本地后续请求准入，输入 Token 使用请求 JSON 字节数加协议开销估算；供应商实际 Usage 和最终账单可能高于本地估算或上限。
 
 ### 运行测试
 
@@ -99,18 +126,18 @@ go test ./cmd/claw
 ### 1. 装配流程（cmd/claw/main.go）
 
 ```
-加载 .env → 校验 OPENAI_API_KEY
+读取 CLI/环境配置（可选 .env 只填缺省值）→ 校验对应 Provider 密钥
     ↓
 Session（绑定 WorkDir） ← GlobalSessionMgr.GetOrCreate
     ↓
-Provider (gpt-5.6-sol，数云兼容网关) → CostTracker 包裹 → trackedProvider
+Provider（默认 gpt-5.6-sol，数云兼容网关）→ CostTracker 包裹 → trackedProvider
     ↓
 Registry：read_file / write_file / bash / edit_file + spawn_subagent
 readOnlyRegistry：read_file / bash（专供子智能体）
     ↓
 AgentEngine(trackedProvider, registry, enableThinking, planMode)
     ↓
-eng.Submit(ctx, sess, prompt, reporter, run.Options{MaxTurns: 20, Timeout: 5*time.Minute})
+eng.Submit(ctx, sess, prompt, reporter, cfg.RunOptions())
   → Session 排队 → 追加用户消息 → ReAct 主循环
 ```
 
@@ -151,8 +178,8 @@ eng.Submit(ctx, sess, prompt, reporter, run.Options{MaxTurns: 20, Timeout: 5*tim
 
 ## 📊 可观测性
 
-- **CostTracker**：装饰器模式包裹 `LLMProvider`，将 Token 与已配置模型的估算费用累加到内存 Session；默认模型费用当前未配置，不应把显示的零费用当作真实账单。
-- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `CLI.TaskRun → Agent.Run → Turn-N → LM.Thinking / LLM.Action` 的树形结构，任务结束后 JSON 导出到 `<workDir>/.claw/traces/trace_<sessionID>_<时间戳>.json`，可完整回放执行链路。
+- **CostTracker**：装饰器模式包裹 `LLMProvider`；每次请求前原子预留估算输入和输出上限，返回 Usage 后结算。Thinking、Action 与子任务共享一次 Run 的预算。缺失 Usage 时保留预留并停止后续请求；Session 同时记录已知金额和未知请求数。估算规则与版本记录在运行账本及请求记录中。
+- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `Agent.Run → Turn-N → LLM.Thinking / LLM.Action` 的树形结构，JSON 按 RunID 排他导出到 `<workDir>/.claw/traces/trace_<RunID>.json`。Trace 包含预算摘要和终止原因，不写完整提示词、工具参数或工具输出；导出失败保留原运行状态并报告错误。
 
 ## 🧰 基准测试（cmd/bench）
 
@@ -200,7 +227,7 @@ type LLMProvider interface {
 }
 ```
 
-2. 在构造函数内集中读取环境变量，并在入口接线。当前 CLI 默认 `provider.NewOpenAIProvider("gpt-5.6-sol")`；`NewDeepseekClaudeProvider` 走 Anthropic 兼容路线。
+2. 在构造函数内集中读取环境变量，并在入口接线。CLI 和飞书入口使用 `provider.NewConfigured`；缺密钥返回错误。新增适配器也应实现 `InputEstimator` 并接收每请求输出上限，以支持预算准入。
 
 ### 工具拦截（中间件）
 

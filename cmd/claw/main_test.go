@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
@@ -59,7 +60,7 @@ func TestREPLContinuesAfterRunFailure(t *testing.T) {
 	p := &replProvider{}
 	session := ctxpkg.NewSession("repl-test", t.TempDir())
 	eng := engine.NewAgentEngine(p, tools.NewRegistry(), false, false)
-	runREPL(context.Background(), eng, session, nil, "mock-model")
+	runREPL(context.Background(), eng, session, nil, "mock-model", runpkg.Options{MaxTurns: 20, Timeout: time.Second})
 	if p.calls != 2 || session.MessageCount() != 3 {
 		t.Fatalf("失败后 REPL 没有继续处理下一条输入: calls=%d messages=%d", p.calls, session.MessageCount())
 	}

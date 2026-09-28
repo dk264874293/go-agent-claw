@@ -16,9 +16,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
+	"github.com/dk264874293/go-agent-claw/internal/budget"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
@@ -70,26 +72,33 @@ func (s *Span) AddAttribute(key string, value interface{}) {
 }
 
 // ExportTraceToFile 当整个根 Span 结束时，将其序列化并保存为本地 JSON 文件
-func ExportTraceToFile(rootSpan *Span, workDir string, sessionID string) error {
+func ExportTraceToFile(rootSpan *Span, workDir string, runID string) (string, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(runID) {
+		return "", fmt.Errorf("RunID 无效")
+	}
 	traceDir := filepath.Join(workDir, ".claw", "traces")
-	os.MkdirAll(traceDir, 0755)
-	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", sessionID, time.Now().Unix()))
+	if err := os.MkdirAll(traceDir, 0700); err != nil {
+		return "", fmt.Errorf("创建 Trace 目录失败: %w", err)
+	}
+	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s.json", runID))
 	// 美化输出 JSON，便于人类和工具阅读
 	data, err := json.MarshalIndent(rootSpan, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.WriteFile(filename, data, 0644)
-}
-
-// PricingModel 定义了不同大模型的计费标准 (单位: 美元/1M Tokens)
-// 为了演示，这里硬编码了当前市面上几个主流模型的官方大致定价。
-var PricingModel = map[string]struct {
-	InputPrice  float64
-	OutputPrice float64
-}{
-	"glm-4.7":        {InputPrice: 0.15, OutputPrice: 0.15}, // 这里假定的大模型价格(每百万Token，tk)
-	"glm-4.7-flashx": {InputPrice: 0.15, OutputPrice: 0.15}, // 当前主力模型，暂沿用 glm-4.7 的假定价格，待官方定价校准
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", fmt.Errorf("创建 Trace 文件失败: %w", err)
+	}
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("写入 Trace 失败: %w", writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("关闭 Trace 失败: %w", closeErr)
+	}
+	return filename, nil
 }
 
 // CostTracker 是一个包装了真实 LLMProvider 的装饰器中间件
@@ -98,6 +107,9 @@ type CostTracker struct {
 	modelName    string
 	session      *ctxpkg.Session // 当前所属的会话 (用于累加总成本)
 }
+
+// EnforcesBudget 表示该包装器在模型请求前执行共享预算准入。
+func (*CostTracker) EnforcesBudget() bool { return true }
 
 // NewCostTracker 构造函数：接收一个现有的 Provider，返回一个被监控的 Provider
 func NewCostTracker(next provider.LLMProvider, modelName string, session *ctxpkg.Session) *CostTracker {
@@ -110,48 +122,89 @@ func NewCostTracker(next provider.LLMProvider, modelName string, session *ctxpkg
 
 // Generate 实现了 LLMProvider 接口！这意味着它可以被无缝注入到 Main Loop 中。
 func (t *CostTracker) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
-
-	// 1. 记录请求发起的时刻
+	ledger := budget.FromContext(ctx)
+	var reservation *budget.Reservation
+	var estimated int64
+	if ledger != nil {
+		if estimator, ok := t.nextProvider.(provider.InputEstimator); ok {
+			var err error
+			estimated, err = estimator.EstimateInput(ctx, msgs, availableTools)
+			if err != nil {
+				return nil, fmt.Errorf("估算模型输入失败: %w", err)
+			}
+		} else if ledger.RequiresEstimate() {
+			return nil, fmt.Errorf("当前 Provider 不支持预算输入估算")
+		}
+		var err error
+		reservation, err = ledger.Reserve(estimated)
+		if err != nil {
+			return nil, err
+		}
+	}
 	startTime := time.Now()
-
-	// 2. 调用真实的底层大模型去执行耗时的网络请求
 	respMsg, err := t.nextProvider.Generate(ctx, msgs, availableTools)
-
-	// 3. 计算耗时
 	latency := time.Since(startTime)
-
-	// 如果报错了，只打印报错时间，不计费
+	var usage *schema.Usage
+	if respMsg != nil {
+		usage = respMsg.Usage
+	}
+	if usage != nil && (usage.PromptTokens < 0 || usage.CompletionTokens < 0) {
+		usage = nil
+	}
+	var settleErr error
+	if ledger != nil {
+		settleErr = ledger.Settle(reservation, usage)
+	}
+	var price *budget.Price
+	if ledger != nil {
+		price = ledger.Price()
+	}
+	var cost int64
+	costKnown := usage != nil && price != nil
+	if costKnown {
+		var costErr error
+		cost, costErr = price.CostMicros(int64(usage.PromptTokens), int64(usage.CompletionTokens))
+		if costErr != nil {
+			costKnown = false
+			if settleErr == nil {
+				settleErr = costErr
+			}
+		}
+	}
+	if t.session != nil {
+		currency := ""
+		if price != nil {
+			currency = price.Currency
+		}
+		t.session.RecordUsage(usage, currency, cost, costKnown)
+		call := ctxpkg.ModelCall{Model: t.modelName, RequestNumber: reservation.Sequence(), Currency: currency,
+			CostMicros: cost, CostKnown: costKnown, UsageKnown: usage != nil, EstimatedInputTokens: estimated, EstimateMethod: provider.InputEstimateMethod}
+		if ledger != nil {
+			snapshot := ledger.Snapshot()
+			call.RunID, call.Provider, call.Model = snapshot.RunID, snapshot.Provider, snapshot.Model
+			call.PriceVersion = snapshot.PriceVersion
+		}
+		if usage != nil {
+			call.PromptTokens, call.CompletionTokens = usage.PromptTokens, usage.CompletionTokens
+		}
+		if usage == nil {
+			call.UnknownReason = "供应商未返回 Usage"
+		} else if !costKnown {
+			call.UnknownReason = "价格未知或费用计算失败"
+		}
+		t.session.RecordModelCall(call)
+	}
+	log.Printf("[Tracker] 模型调用结束 | 模型: %s | 耗时: %v | 费用状态: %s", t.modelName, latency, func() string {
+		if costKnown {
+			return price.Currency + " " + budget.FormatMicros(cost)
+		}
+		return "未知"
+	}())
 	if err != nil {
-		log.Printf("[Tracker] ❌ API 调用失败，耗时: %v\n", latency)
 		return respMsg, err
 	}
-
-	// 4. 解析 Token 并计算成本
-	if respMsg == nil {
-		return nil, nil
+	if settleErr != nil {
+		return respMsg, settleErr
 	}
-	if respMsg.Usage != nil {
-		promptTokens := respMsg.Usage.PromptTokens
-		completionTokens := respMsg.Usage.CompletionTokens
-
-		var cost float64
-		if price, exists := PricingModel[t.modelName]; exists {
-			// 计算美元花费 = (输入Tokens * 输入单价 + 输出Tokens * 输出单价) / 1000000
-			cost = (float64(promptTokens)*price.InputPrice + float64(completionTokens)*price.OutputPrice) / 1000000.0
-		}
-
-		// 5. 打印精美的仪表盘日志
-		log.Printf("[Tracker] 📊 API 调用完成 | 耗时: %v | 输入: %d tk | 输出: %d tk | 花费: ¥%.6f\n",
-			latency, promptTokens, completionTokens, cost)
-
-		// 6. 将账单累加到当前的 Session 中，供人类后续随时查询
-		if t.session != nil {
-			t.session.RecordUsage(promptTokens, completionTokens, cost)
-			log.Printf("[Tracker] 💰 当前会话 (%s) 累计花费: ¥%.6f\n", t.session.ID, t.session.UsageSnapshot().TotalCostCNY)
-		}
-	} else {
-		log.Printf("[Tracker] ⚠️ API 调用完成，但未返回 Usage 数据 | 耗时: %v\n", latency)
-	}
-
 	return respMsg, nil
 }

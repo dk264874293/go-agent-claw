@@ -28,7 +28,9 @@ CLI 入口位于 `cmd/claw/main.go`，当前默认配置为：
 - API 地址：数云 OpenAI 兼容网关
 - 环境变量：`OPENAI_API_KEY`
 - Thinking：关闭
-- PlanMode：开启
+- PlanMode：默认关闭，可通过 CLI/`CLAW_PLAN_MODE` 开启
+- 默认运行上限：20 轮、5 分钟、单工具 30 秒、只读并发 4、每 Run 100000 Token、每请求最多输出 4096 Token
+- 可选价目表：由操作者提供，按 Provider、网关地址和模型匹配；缺价时费用为未知
 - 主工具：`read_file`、`write_file`、`edit_file`、`bash`、`spawn_subagent`
 - 子智能体工具：`read_file`、`bash`
 
@@ -90,6 +92,8 @@ internal/run/               单次运行选项、状态与终止原因
 internal/context/           Session、Compactor、Recovery、PromptComposer、SkillLoader
 internal/tools/             Registry 与文件、Shell、子智能体工具
 internal/observability/     CostTracker 与本地 JSON Trace
+internal/config/            入口配置解析、校验和 Run Options 转换
+internal/budget/            价目快照、请求预留与共享预算账本
 internal/feishu/            飞书事件处理、Reporter 和审批管理
 internal/eval/              基准测试 Runner
 workspace/                  演示、评测和运行产物，不属于正式模块
@@ -146,7 +150,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### P0：主 Agent 的资源限制尚未完整
 
-`AgentEngine.Run` 已有 `MaxTurns` 和基于 context 的总超时，并由 Mock Provider 验证；CLI 和飞书入口目前使用固定的 20 轮、5 分钟。单工具默认超时 30 秒（包含审批等待），只读批次默认最多 4 个 worker，可通过 Run Options 修改。Token、费用尚无硬性上限；不响应 context 的自定义工具、阻塞的文件系统 I/O 和主动脱离 Shell 进程组的程序仍需后续治理。ReminderInjector 只是提示词干预，不能作为资源限制。
+`AgentEngine.Run` 有 `MaxTurns` 和基于 context 的总超时；CLI、飞书和 benchmark 通过统一配置传入上限。默认 20 轮、5 分钟、每 Run 100000 Token；单工具 30 秒（包含审批等待），只读批次最多 4 个 worker。每请求明确设置输出 Token 上限，默认 4096。`CostTracker` 请求前估算并原子预留输入、输出及可选费用；Thinking、Action 与子任务共享 Run 账本。输入估算使用序列化请求 JSON 的 UTF-8 字节数加协议开销，供应商实际 Usage/账单可能超出本地上限；缺失 Usage 时保留预留并停止后续请求。费用预算只有显式匹配价格时才可启用。不响应 context 的自定义工具、阻塞的文件系统 I/O 和主动脱离 Shell 进程组的程序仍需后续治理。ReminderInjector 只是提示词干预，不能作为资源限制。
 
 ### 工具输出与取消约定
 
@@ -161,9 +165,8 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 ### P1：状态、成本和追踪尚不可靠
 
 - Session 只存在于进程内存，`-session` 只能在当前进程内复用，不能实现重启后的历史恢复。
-- 默认模型 `gpt-5.6-sol` 不在 `PricingModel` 中，因此当前费用总是零。
-- 价格表注释使用美元，字段和终端展示使用 CNY/人民币符号，计费币种尚未统一。
-- Trace 文件使用秒级时间戳，同一 Session 在同一秒导出时可能覆盖；目录创建错误也被忽略。
+- 不预置默认模型或网关的价格；费用只有在显式价目表匹配且供应商返回 Usage 时才显示确定金额，否则显示未知。Session 将不同币种分开汇总。
+- Trace 文件按随机 RunID 排他创建，目录/写入错误在运行结果中可见；它不含完整提示词、工具参数和输出，但仍是本地执行元数据，应按后续保留策略治理。
 
 不要向用户宣称会话已经持久化或成本已经准确，除非相关实现和测试已补齐。
 
@@ -175,7 +178,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 ### P2：默认行为和仓库卫生
 
-- CLI 默认开启 PlanMode，简单请求也可能创建或修改工作区根目录下的 `PLAN.md`、`TODO.md`。
+- CLI 默认关闭 PlanMode；显式开启后，模型可能创建或修改工作区根目录下的 `PLAN.md`、`TODO.md`。
 - SkillLoader 会把 `.claw/skills` 下所有 `SKILL.md` 正文一次性注入系统提示词，没有按触发条件渐进加载。
 - 多数旧 Go 文件尚未统一 gofmt；修改文件时只格式化本次涉及的 Go 文件，避免无关大范围变更。
 - `.claw/`、`.zcode/`、`workspace/` 当前会显示为未跟踪目录。不要把运行生成的 trace、计划文件、评测工作区或二进制提交到仓库。

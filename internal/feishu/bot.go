@@ -46,11 +46,12 @@ func ReporterFromContext(ctx context.Context) engine.Reporter {
 // AgentEngineFactory 允许每次收到消息时，根据 Session 动态创建引擎
 type AgentEngineFactory func(session *ctxpkg.Session) *engine.AgentEngine
 type FeishuBot struct {
-	client    *lark.Client
-	appID     string
-	appSecret string
-	workDir   string             // 保存从入口传来的工作区路径
-	factory   AgentEngineFactory // 替换掉原来的单一 engine 引用
+	client     *lark.Client
+	appID      string
+	appSecret  string
+	workDir    string             // 保存从入口传来的工作区路径
+	factory    AgentEngineFactory // 替换掉原来的单一 engine 引用
+	RunOptions runpkg.Options
 }
 
 func NewFeishuBotWithFactory(factory AgentEngineFactory, workDir string) *FeishuBot {
@@ -110,6 +111,9 @@ func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
 	done := b.submitAgentRun(context.Background(), chatId, prompt, reporter)
 	go func() {
 		outcome := <-done
+		if outcome.Result.TraceError != "" {
+			reporter.sendMsg(context.Background(), "⚠️ Trace 导出失败: "+outcome.Result.TraceError)
+		}
 		if outcome.Err != nil {
 			reporter.sendMsg(context.Background(), fmt.Sprintf("❌ Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v", outcome.Result.RunID, outcome.Result.Reason, outcome.Err))
 		}
@@ -120,7 +124,11 @@ func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
 func (b *FeishuBot) submitAgentRun(ctx context.Context, chatID, prompt string, reporter engine.Reporter) <-chan engine.Outcome {
 	session := ctxpkg.GlobalSessionMgr.GetOrCreate(chatID, b.workDir)
 	eng := b.factory(session)
-	return eng.Start(ContextWithReporter(ctx, reporter), session, prompt, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
+	opts := b.RunOptions
+	if opts.MaxTurns == 0 {
+		opts = runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute, MaxTotalTokens: 100000, MaxOutputTokens: 4096}
+	}
+	return eng.Start(ContextWithReporter(ctx, reporter), session, prompt, reporter, opts)
 }
 
 // ==========================================

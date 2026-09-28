@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/dk264874293/go-agent-claw/internal/config"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
@@ -37,19 +38,36 @@ type TestCase struct {
 
 // TestResult 存放单次跑分结果
 type TestResult struct {
-	TestCaseID   string
-	Passed       bool
-	TotalCostCNY float64
-	DurationMs   int64
-	ErrorMsg     string
+	TestCaseID string
+	Passed     bool
+	CostLabel  string
+	DurationMs int64
+	ErrorMsg   string
 }
 
 type BenchmarkRunner struct {
 	modelName string
+	config    config.Config
+	options   runpkg.Options
 }
 
 func NewBenchmarkRunner(model string) *BenchmarkRunner {
-	return &BenchmarkRunner{modelName: model}
+	cfg := config.Defaults()
+	cfg.Provider, cfg.Model = "zhipu-openai", model
+	cfg.BaseURL = provider.DefaultURL(cfg.Provider)
+	opts, _ := cfg.RunOptions()
+	return &BenchmarkRunner{modelName: model, config: cfg, options: opts}
+}
+
+func NewBenchmarkRunnerWithConfig(cfg config.Config) (*BenchmarkRunner, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	opts, err := cfg.RunOptions()
+	if err != nil {
+		return nil, err
+	}
+	return &BenchmarkRunner{modelName: cfg.Model, config: cfg, options: opts}, nil
 }
 
 // RunSuite 执行一组评测集，并返回跑分报告
@@ -60,7 +78,6 @@ func (b *BenchmarkRunner) RunSuite(ctx context.Context, testcases []TestCase) {
 
 	var results []TestResult
 	passedCount := 0
-	totalCost := 0.0
 
 	for _, tc := range testcases {
 		log.Printf("\n>>> ⏳ 正在执行用例 [%s]: %s\n", tc.ID, tc.Name)
@@ -70,24 +87,23 @@ func (b *BenchmarkRunner) RunSuite(ctx context.Context, testcases []TestCase) {
 
 		if res.Passed {
 			passedCount++
-			log.Printf(">>> ✅ 用例 [%s] 测试通过! | 耗时: %dms | 花费: $%.6f\n", tc.ID, res.DurationMs, res.TotalCostCNY)
+			log.Printf(">>> ✅ 用例 [%s] 测试通过! | 耗时: %dms | 费用: %s\n", tc.ID, res.DurationMs, res.CostLabel)
 		} else {
-			log.Printf(">>> ❌ 用例 [%s] 测试失败! | 错误: %s\n", tc.ID, res.ErrorMsg)
+			log.Printf(">>> ❌ 用例 [%s] 测试失败! | 费用: %s | 错误: %s\n", tc.ID, res.CostLabel, res.ErrorMsg)
 		}
-		totalCost += res.TotalCostCNY
 	}
 
 	// 打印终极报表
 	log.Println("\n================ 🏆 跑分终极报告 ================")
 	log.Printf("总用例数: %d | 成功数: %d | 成功率: %.2f%%\n", len(testcases), passedCount, float64(passedCount)/float64(len(testcases))*100)
-	log.Printf("总消耗成本: $%.6f\n", totalCost)
+	log.Println("费用按用例展示；未知或不同币种不合并")
 	log.Println("==================================================")
 }
 
 func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestResult {
 	startTime := time.Now()
 
-	// 1. 为每个用例创建一个绝对干净的沙箱目录 (物理隔离)
+	// 1. 为每个用例创建独立工作目录；这不构成进程级沙箱。
 	workDir, _ := os.Getwd()
 	workDir += fmt.Sprintf("/workspace/%s_%d", tc.ID, time.Now().Unix())
 	_ = os.MkdirAll(workDir, 0755)
@@ -102,8 +118,11 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	}
 
 	// 3. 组装具备打点能力 (Tracker) 的引擎
-	realProvider := provider.NewZhipuOpenAIProvider(b.modelName) // 使用真实的 GLM API
-	session := ctxpkg.NewSession(tc.ID, workDir)                 // 为本次跑分单独建一个 Session 记账
+	realProvider, providerErr := provider.NewConfigured(b.config.Provider, b.config.Model, b.config.BaseURL)
+	if providerErr != nil {
+		return TestResult{TestCaseID: tc.ID, ErrorMsg: providerErr.Error(), CostLabel: "未知"}
+	}
+	session := ctxpkg.NewSession(tc.ID, workDir) // 为本次跑分单独建一个 Session 记账
 	trackedProvider := observability.NewCostTracker(realProvider, b.modelName, session)
 
 	registry := tools.NewRegistry()
@@ -112,19 +131,19 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	registry.Register(tools.NewBashTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
 
-	eng := engine.NewAgentEngine(trackedProvider, registry, false, false)
+	eng := engine.NewAgentEngine(trackedProvider, registry, b.config.Thinking, b.config.PlanMode)
 
 	// 4. 让 Agent 开始干活
 
 	// 我们传入一个空的 reporter 屏蔽普通日志，防止刷屏
-	maxTurns := tc.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 20
+	opts := b.options
+	if tc.MaxTurns > 0 && tc.MaxTurns < opts.MaxTurns {
+		opts.MaxTurns = tc.MaxTurns
 	}
-	result, err := eng.Submit(ctx, session, tc.TaskPrompt, nil, runpkg.Options{MaxTurns: maxTurns, Timeout: 5 * time.Minute})
+	result, err := eng.Submit(ctx, session, tc.TaskPrompt, nil, opts)
 
 	if err != nil {
-		return TestResult{TestCaseID: tc.ID, Passed: false, ErrorMsg: fmt.Sprintf("Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v", result.RunID, result.Reason, err)}
+		return TestResult{TestCaseID: tc.ID, Passed: false, CostLabel: session.UsageSnapshot().CostLabel(), ErrorMsg: fmt.Sprintf("Agent 运行失败 | RunID: %s | 原因: %s | 错误: %v | Trace: %s", result.RunID, result.Reason, err, result.TraceError)}
 	}
 
 	// 5. 【核心断言】Agent 跑完了，我们来验收成果！
@@ -136,18 +155,18 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 
 	if err != nil {
 		return TestResult{
-			TestCaseID:   tc.ID,
-			Passed:       false,
-			TotalCostCNY: session.UsageSnapshot().TotalCostCNY,
-			DurationMs:   duration,
-			ErrorMsg:     fmt.Sprintf("验证脚本执行失败: %s", string(out)),
+			TestCaseID: tc.ID,
+			Passed:     false,
+			CostLabel:  session.UsageSnapshot().CostLabel(),
+			DurationMs: duration,
+			ErrorMsg:   fmt.Sprintf("验证脚本执行失败: %s", string(out)),
 		}
 	}
 
 	return TestResult{
-		TestCaseID:   tc.ID,
-		Passed:       true,
-		TotalCostCNY: session.UsageSnapshot().TotalCostCNY,
-		DurationMs:   duration,
+		TestCaseID: tc.ID,
+		Passed:     true,
+		CostLabel:  session.UsageSnapshot().CostLabel(),
+		DurationMs: duration,
 	}
 }

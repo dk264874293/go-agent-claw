@@ -1,6 +1,6 @@
 # M3 开发 spec：统一配置、共享预算与可信追踪
 
-状态：待实施。对应 [开发计划](../development-plan.md) 的 S1-07 至 S1-09；以 M1、M2 的提交与无网络验收为基线。
+状态：已实施，待完成目标平台真实网关兼容性验收。对应 [开发计划](../development-plan.md) 的 S1-07 至 S1-09；以 M1、M2 的提交与无网络验收为基线。
 
 ## 目标与边界
 
@@ -8,7 +8,7 @@
 
 M3 仍使用内存 Session，不实现重启恢复、沙箱、全局多用户配额或供应商侧绝对费用上限。Token 估算与供应商最终 Usage 可能不同；预算保证本地请求准入和后续停止，最终账单可能因在途请求超过设定值。文档与界面必须说明这一限制。
 
-## 当前代码依据
+## 实施前代码依据
 
 - `cmd/claw/main.go` 固定 `gpt-5.6-sol`、网关、20 轮、5 分钟与开启的 PlanMode，且 `godotenv.Overload` 会覆盖进程环境变量；`cmd/agentops` 与 benchmark 也各自固定模型和上限。
 - `internal/provider/openai.go` 未传模型输出上限；`internal/provider/claude.go` 固定 `MaxTokens=4096`。Provider 只在成功响应中提取 Usage。
@@ -86,3 +86,7 @@ Trace 至少包含 RunID、SessionID、Provider、模型、配置/价格版本�
 | REPL 与飞书入口 | 每次提交使用配置的预算；会话 FIFO、M1/M2 取消与消息配对测试继续通过 |
 
 执行 `go test ./cmd/... ./internal/...`、`go vet ./cmd/... ./internal/...`、`go build ./cmd/... ./internal/...`，并对 `internal/engine`、`internal/context`、`internal/observability`、`internal/tools`、CLI 与飞书相关路径运行 `go test -race`。不调用真实 LLM 或飞书 API；付费验证只有用户明确要求后才执行。
+
+## 实施验收记录
+
+M3 已通过上述全量单测、vet、构建及相关包的 race 检查。无网络测试覆盖配置覆盖优先级、无效配置、匹配/重复价目、预算临界点与并发预留、Thinking 和子任务共享余额、飞书入口预算传递、两类 Provider 的输出上限与 Usage、Trace 唯一性及失败反馈、工具原始内容不进入 Trace。未运行真实 LLM、飞书 API 或目标网关兼容性测试；本地预算只控制请求准入，不等同于供应商侧最终账单上限。

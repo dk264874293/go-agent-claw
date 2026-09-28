@@ -5,7 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/dk264874293/go-agent-claw/internal/budget"
 )
+
+const ConfigSchemaVersion = "m3-v1"
 
 // Options 定义单次运行的硬性轮数和时间上限。
 type Options struct {
@@ -13,6 +17,13 @@ type Options struct {
 	Timeout            time.Duration
 	ToolTimeout        time.Duration
 	MaxConcurrentTools int
+	MaxTotalTokens     int64
+	MaxOutputTokens    int
+	MaxCostMicros      int64
+	Price              *budget.Price
+	Provider           string
+	Model              string
+	ConfigVersion      string
 }
 
 // Status 表示运行的技术状态，不代表用户任务已通过业务验收。
@@ -35,6 +46,9 @@ const (
 	ReasonCallerCancelled Reason = "caller_cancelled"
 	ReasonProviderError   Reason = "provider_error"
 	ReasonInvalidResponse Reason = "invalid_response"
+	ReasonTokenBudget     Reason = "token_budget"
+	ReasonCostBudget      Reason = "cost_budget"
+	ReasonUsageUnknown    Reason = "usage_unknown"
 )
 
 var (
@@ -44,17 +58,21 @@ var (
 	ErrCallerCancelled = errors.New("调用方取消运行")
 	ErrProvider        = errors.New("模型请求失败")
 	ErrInvalidResponse = errors.New("模型响应无效")
+	ErrUsageUnknown    = budget.ErrUsageUnknown
 )
 
 // Result 是一次运行结束后的快照。
 type Result struct {
-	RunID     string
-	SessionID string
-	Status    Status
-	Reason    Reason
-	StartedAt time.Time
-	EndedAt   time.Time
-	Turns     int
+	RunID      string
+	SessionID  string
+	Status     Status
+	Reason     Reason
+	StartedAt  time.Time
+	EndedAt    time.Time
+	Turns      int
+	Budget     budget.Snapshot
+	TracePath  string
+	TraceError string
 }
 
 // NewID 生成跨进程仍有足够碰撞余量的随机运行标识。

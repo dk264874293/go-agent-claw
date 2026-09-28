@@ -37,9 +37,9 @@
 - [x] S1-04：加入 MaxTurns 和总超时，主循环在发起下一次模型请求前检查硬性退出条件；正常结束、取消、轮数耗尽和超时有不同终止原因。
 - [x] S1-05：贯通取消，Shell 管理进程组并回收后代进程；工具输出使用有界缓冲，文件读取使用有界读取。超时和截断通过结构化字段表达。
 - [x] S1-06：同一 Session 从接收任务、追加用户消息到 Run 完成整体串行；飞书入口必须在追加消息前进入该串行边界，不能只锁住 Run。工具设置超时与并发上限；独立只读工具可限流并发，写工具和通用 Shell 暂按顺序执行。账单读取改为加锁快照。
-- [ ] S1-07：按 [M3 开发 spec](specs/m3-config-budget-trace.md) 统一 CLI/环境配置和入口选项传递；支持 Provider、模型、地址、Thinking、PlanMode 与运行预算，PlanMode 默认关闭。
-- [ ] S1-08：使用按 Provider/网关和模型匹配的不可变价格快照，费用记录包含币种、版本和“未知”状态；Trace 按 RunID 唯一导出且错误可见，清理原始敏感属性；同步 README 与 AGENTS.md。
-- [ ] S1-09：加入每 Run 的 Token 预算、每请求输出上限和主子任务共享账本；请求前原子预留、请求后按实际 Usage 结算。费用未知时不能按零费用放行费用预算，预算耗尽有确定的终止原因。
+- [x] S1-07：按 [M3 开发 spec](specs/m3-config-budget-trace.md) 统一 CLI/环境配置和入口选项传递；支持 Provider、模型、地址、Thinking、PlanMode 与运行预算，PlanMode 默认关闭。
+- [x] S1-08：使用按 Provider/网关和模型匹配的不可变价格快照，费用记录包含币种、版本和“未知”状态；Trace 按 RunID 唯一导出且错误可见，清理原始敏感属性；同步 README 与 AGENTS.md。
+- [x] S1-09：加入每 Run 的 Token 预算、每请求输出上限和主子任务共享账本；请求前原子预留、请求后按实际 Usage 结算。费用未知时不能按零费用放行费用预算，预算耗尽有确定的终止原因。
 
 主要改动：`internal/engine`、`internal/tools`、`internal/context/session.go`、`internal/observability`、`internal/provider`、`cmd/claw`；按需新增 `internal/run`、`internal/config`。
 
@@ -62,7 +62,7 @@ S1-01 至 S1-04 已按 [M1 开发 spec](specs/m1-controlled-run.md) 实现。Moc
 
 ### M2 验收记录（2026-09-28）
 
-S1-05、S1-06 已按 [M2 开发 spec](specs/m2-cancellation-scheduling.md) 实现。自动化测试覆盖同会话 FIFO、飞书提交顺序、排队取消、只读限流与写入屏障、工具元数据、输出上限、路径越界、Shell 进程组回收和审批取消。构建、vet、全量单元测试及相关 race 测试通过；并发关键包 `-race -count=10` 通过。Linux 仅完成交叉编译，目标平台运行验收与真实飞书事件/API 验证留待具备环境后执行；未运行付费 LLM 调用。M3 仍需实现配置、Token/费用预算和 Trace 唯一性。
+S1-05、S1-06 已按 [M2 开发 spec](specs/m2-cancellation-scheduling.md) 实现。自动化测试覆盖同会话 FIFO、飞书提交顺序、排队取消、只读限流与写入屏障、工具元数据、输出上限、路径越界、Shell 进程组回收和审批取消。构建、vet、全量单元测试及相关 race 测试通过；并发关键包 `-race -count=10` 通过。Linux 仅完成交叉编译，目标平台运行验收与真实飞书事件/API 验证留待具备环境后执行；未运行付费 LLM 调用。
 
 ## 阶段 2：权限与执行隔离
 
@@ -202,6 +202,6 @@ S1-05、S1-06 已按 [M2 开发 spec](specs/m2-cancellation-scheduling.md) 实�
 
 ## 下一迭代建议
 
-M1、M2 已完成；[M3 开发 spec](specs/m3-config-budget-trace.md) 已拆分配置、计量、共享预算、Provider 输出限制、Trace 和验收六个切片。下一步依次实施 S1-07 至 S1-09，每个切片通过针对性无网络测试后再合并。实际人日尚无可信记录，参考工期按实现中的兼容性验证持续重估。
+M1、M2、M3 的本地实现已完成。M3 覆盖统一配置、明确输出上限、可审计价格与未知费用、共享预算、按 RunID 导出 Trace；全量单测、vet、构建和相关 race 检查通过，测试使用 Mock Provider 和本地 HTTP 伪服务，未运行付费 LLM 或飞书 API。真实兼容网关是否接受输出上限字段、最终账单与估算的差异仍需在具备授权与环境后验证。实际人日尚无可信记录。
 
 首个里程碑演示应包括两个任务：一个正常工具任务能够完成；一个无限请求工具的模拟模型被轮数或总超时确定性终止。二者都能输出关联的运行记录、工具结果和真实终止原因。Token 与费用预算的演示属于 M3。

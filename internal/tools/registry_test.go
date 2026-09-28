@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -39,6 +40,21 @@ func TestRegistryPreservesOutputOnFailure(t *testing.T) {
 	}
 	if !strings.Contains(got.Output, "已写入的诊断输出") || !strings.Contains(got.Output, "执行失败") {
 		t.Fatalf("失败结果丢失输出或错误原因: %q", got.Output)
+	}
+}
+
+func TestTraceOmitsToolArgumentsAndOutput(t *testing.T) {
+	r := NewRegistry()
+	r.Register(resultTool{name: "echo", output: "私密输出标记"})
+	ctx, span := observability.StartSpan(context.Background(), "run")
+	r.Execute(ctx, schema.ToolCall{ID: "call", Name: "echo", Arguments: json.RawMessage(`{"value":"私密参数标记"}`)})
+	span.EndSpan()
+	data, err := json.Marshal(span)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "私密参数标记") || strings.Contains(string(data), "私密输出标记") {
+		t.Fatalf("Trace 包含工具原始内容: %s", data)
 	}
 }
 

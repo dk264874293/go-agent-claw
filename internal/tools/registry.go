@@ -100,7 +100,7 @@ func cancelledResult(ctx context.Context, call schema.ToolCall) schema.ToolResul
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (result schema.ToolResult) {
 	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
 	span.AddAttribute("tool_name", call.Name)
-	span.AddAttribute("arguments", string(call.Arguments))
+	span.AddAttribute("arguments_bytes", len(call.Arguments))
 	result.ToolCallID = call.ID
 	defer func() {
 		if ctx.Err() != nil {
@@ -112,7 +112,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 			result.Output = outputText([]byte(result.Output[:maxOutputBytes]), true)
 			result.Truncated = true
 		}
-		span.AddAttribute("output_preview", truncate(result.Output, 200))
+		span.AddAttribute("output_bytes", len(result.Output))
 		span.AddAttribute("is_error", result.IsError)
 		span.EndSpan()
 	}()

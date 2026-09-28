@@ -11,6 +11,7 @@ import (
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
+	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
@@ -38,7 +39,7 @@ func (p *orderedProvider) Generate(ctx context.Context, _ []schema.Message, _ []
 
 func TestFeishuSubmissionPreservesSessionOrder(t *testing.T) {
 	p := &orderedProvider{entered: make(chan struct{}), release: make(chan struct{})}
-	b := &FeishuBot{workDir: t.TempDir(), factory: func(*ctxpkg.Session) *engine.AgentEngine {
+	b := &FeishuBot{workDir: t.TempDir(), RunOptions: runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute}, factory: func(*ctxpkg.Session) *engine.AgentEngine {
 		return engine.NewAgentEngine(p, tools.NewRegistry(), false, false)
 	}}
 	chatID := fmt.Sprintf("测试会话-%d", feishuTestChatSequence.Add(1))

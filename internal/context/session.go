@@ -2,9 +2,13 @@
 package context
 
 import (
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/dk264874293/go-agent-claw/internal/budget"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -16,34 +20,104 @@ type Session struct {
 	UpdatedAt time.Time
 
 	// 【新增】用于统计该 Session 累计消耗的资源
-	usage    UsageSnapshot
-	runQueue []*RunTicket
+	usage      UsageSnapshot
+	modelCalls []ModelCall
+	runQueue   []*RunTicket
 
 	// 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
 	history []schema.Message
 	mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
 }
 
-// RecordUsage 是一个给外部 Tracker 调用的辅助方法，用于累加账单
-func (s *Session) RecordUsage(prompt int, completion int, cost float64) {
+// RecordUsage 在同一锁下更新已知用量与费用状态。
+func (s *Session) RecordUsage(usage *schema.Usage, currency string, costMicros int64, costKnown bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.usage.TotalPromptTokens += prompt
-	s.usage.TotalCompletionTokens += completion
-	s.usage.TotalCostCNY += cost
+	if usage == nil {
+		s.usage.UnknownUsageRequests++
+	} else {
+		s.usage.TotalPromptTokens += usage.PromptTokens
+		s.usage.TotalCompletionTokens += usage.CompletionTokens
+	}
+	if costKnown {
+		if s.usage.KnownCostMicros == nil {
+			s.usage.KnownCostMicros = make(map[string]int64)
+		}
+		s.usage.KnownCostMicros[currency] += costMicros
+	} else {
+		s.usage.UnknownCostRequests++
+	}
 }
 
 // UsageSnapshot 是可安全交给调用方的账单副本。
 type UsageSnapshot struct {
 	TotalPromptTokens     int
 	TotalCompletionTokens int
-	TotalCostCNY          float64
+	KnownCostMicros       map[string]int64
+	UnknownCostRequests   int
+	UnknownUsageRequests  int
+}
+
+// ModelCall 是可审计的单次模型调用计量记录，不包含提示词或密钥。
+type ModelCall struct {
+	RunID                string
+	RequestNumber        int
+	Provider             string
+	Model                string
+	PromptTokens         int
+	CompletionTokens     int
+	UsageKnown           bool
+	Currency             string
+	PriceVersion         string
+	CostMicros           int64
+	CostKnown            bool
+	UnknownReason        string
+	EstimatedInputTokens int64
+	EstimateMethod       string
+}
+
+func (s *Session) RecordModelCall(call ModelCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelCalls = append(s.modelCalls, call)
+}
+
+func (s *Session) ModelCalls() []ModelCall {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]ModelCall(nil), s.modelCalls...)
+}
+
+func (u UsageSnapshot) CostLabel() string {
+	var currencies []string
+	for currency := range u.KnownCostMicros {
+		currencies = append(currencies, currency)
+	}
+	sort.Strings(currencies)
+	var parts []string
+	for _, currency := range currencies {
+		parts = append(parts, fmt.Sprintf("%s %s", currency, budget.FormatMicros(u.KnownCostMicros[currency])))
+	}
+	if u.UnknownCostRequests > 0 {
+		parts = append(parts, fmt.Sprintf("%d 笔费用未知", u.UnknownCostRequests))
+	}
+	if len(parts) == 0 {
+		return "尚无已知费用"
+	}
+	return strings.Join(parts, "；")
 }
 
 func (s *Session) UsageSnapshot() UsageSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.usage
+	result := s.usage
+	if result.KnownCostMicros != nil {
+		result.KnownCostMicros = make(map[string]int64, len(s.usage.KnownCostMicros))
+		for currency, amount := range s.usage.KnownCostMicros {
+			result.KnownCostMicros[currency] = amount
+		}
+	}
+	return result
 }
 
 func NewSession(id string, workDir string) *Session {

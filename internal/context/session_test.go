@@ -172,7 +172,7 @@ func TestSession_ResetHistoryAndMessageCount(t *testing.T) {
 	}
 
 	s.Append(buildHistory(3)...) // 7 条
-	s.RecordUsage(100, 200, 0.5)
+	s.RecordUsage(&schema.Usage{PromptTokens: 100, CompletionTokens: 200}, "CNY", 500000, true)
 	if n := s.MessageCount(); n != 7 {
 		t.Fatalf("追加 7 条后应为 7 条消息，实际 %d 条", n)
 	}
@@ -181,9 +181,9 @@ func TestSession_ResetHistoryAndMessageCount(t *testing.T) {
 	if n := s.MessageCount(); n != 0 {
 		t.Fatalf("清空后应为 0 条消息，实际 %d 条", n)
 	}
-	if s.UsageSnapshot().TotalPromptTokens != 100 || s.UsageSnapshot().TotalCompletionTokens != 200 || s.UsageSnapshot().TotalCostCNY != 0.5 {
-		t.Fatalf("清空上下文不应清零账单，实际: ¥%.6f, In %d, Out %d",
-			s.UsageSnapshot().TotalCostCNY, s.UsageSnapshot().TotalPromptTokens, s.UsageSnapshot().TotalCompletionTokens)
+	if s.UsageSnapshot().TotalPromptTokens != 100 || s.UsageSnapshot().TotalCompletionTokens != 200 || s.UsageSnapshot().KnownCostMicros["CNY"] != 500000 {
+		t.Fatalf("清空上下文不应清零账单，实际: CNY %d 微单位, In %d, Out %d",
+			s.UsageSnapshot().KnownCostMicros["CNY"], s.UsageSnapshot().TotalPromptTokens, s.UsageSnapshot().TotalCompletionTokens)
 	}
 
 	// 清空后继续对话：结构必须仍满足 API 的两道硬性校验

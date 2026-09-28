@@ -77,9 +77,9 @@ func TestUsageSnapshotConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 1000; j++ {
-				s.RecordUsage(1, 2, 0.5)
+				s.RecordUsage(&schema.Usage{PromptTokens: 1, CompletionTokens: 2}, "CNY", 500000, true)
 				got := s.UsageSnapshot()
-				if got.TotalCompletionTokens != 2*got.TotalPromptTokens || got.TotalCostCNY != float64(got.TotalPromptTokens)/2 {
+				if got.TotalCompletionTokens != 2*got.TotalPromptTokens || got.KnownCostMicros["CNY"] != int64(got.TotalPromptTokens)*500000 {
 					t.Error("账单快照不一致")
 					return
 				}

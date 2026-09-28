@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/dk264874293/go-agent-claw/internal/config"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/feishu"
@@ -20,11 +21,11 @@ import (
 
 func main() {
 	// 加载 .env 文件
-	godotenv.Overload()
+	_ = godotenv.Load()
 	log.Println("🚀 正在启动 go-tiny-claw AgentOps 飞书服务端...")
 
-	if os.Getenv("ZHIPU_API_KEY") == "" || os.Getenv("FEISHU_APP_ID") == "" {
-		log.Fatal("❌ 请先导出 ZHIPU_API_KEY 和 飞书相关的环境变量")
+	if os.Getenv("FEISHU_APP_ID") == "" || os.Getenv("FEISHU_APP_SECRET") == "" {
+		log.Fatal("请先设置飞书应用凭证")
 	}
 
 	// 1. 设定监控的物理工作区
@@ -35,8 +36,21 @@ func main() {
 	}
 
 	// 2. 初始化底层大脑与注册表
-	modelName := "glm-4.5-air"
-	llmProvider := provider.NewZhipuOpenAIProvider(modelName)
+	defaults := config.Defaults()
+	defaults.Provider, defaults.Model = "zhipu-openai", "glm-4.5-air"
+	cfg, err := config.Parse(nil, os.Getenv, defaults)
+	if err != nil {
+		log.Fatalf("配置错误: %v", err)
+	}
+	opts, err := cfg.RunOptions()
+	if err != nil {
+		log.Fatalf("预算配置错误: %v", err)
+	}
+	modelName := cfg.Model
+	llmProvider, err := provider.NewConfigured(cfg.Provider, cfg.Model, cfg.BaseURL)
+	if err != nil {
+		log.Fatalf("Provider 配置错误: %v", err)
+	}
 
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(workDir))
@@ -77,11 +91,12 @@ func main() {
 		trackedProvider := observability.NewCostTracker(llmProvider, modelName, session)
 
 		// 返回一个新组装的 Engine 实例
-		return engine.NewAgentEngine(trackedProvider, registry, false, false)
+		return engine.NewAgentEngine(trackedProvider, registry, cfg.Thinking, cfg.PlanMode)
 	}
 
 	// 5. 初始化飞书 Bot 调度中心
 	bot := feishu.NewFeishuBotWithFactory(engineFactory, workDir)
+	bot.RunOptions = opts
 	handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher())
 
 	// 6. 注册 Webhook 路由并启动 HTTP Server
@@ -90,7 +105,7 @@ func main() {
 	port := ":48080"
 	log.Printf("📡 Webhook 服务已启动，正在监听端口 %s，请配置 ngrok...\n", port)
 
-	err := http.ListenAndServe(port, nil)
+	err = http.ListenAndServe(port, nil)
 	if err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
 	}

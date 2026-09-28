@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dk264874293/go-agent-claw/internal/config"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	// "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
@@ -33,22 +33,22 @@ func main() {
 }
 
 func runMain() int {
-	// 加载 .env 文件
-	godotenv.Overload()
-	// 确保已设置 api key
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("请先导出 OPENAI_API_KEY 环境变量")
+	// .env 只补齐进程环境中不存在的值，不覆盖显式环境变量。
+	_ = godotenv.Load()
+	cfg, err := config.Parse(os.Args[1:], os.Getenv, config.Defaults())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "配置错误:", err)
+		return 2
 	}
-	// 1. 命令行参数解析：-prompt 留空时进入交互对话模式 (REPL)
-	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述 (留空则进入交互对话模式)")
-	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
-	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
-	flag.Parse()
-
-	interactive := *promptPtr == ""
+	opts, err := cfg.RunOptions()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "预算配置错误:", err)
+		return 2
+	}
+	interactive := cfg.Prompt == ""
 
 	// 解析工作区绝对路径
-	workDir, err := filepath.Abs(*workDirPtr)
+	workDir, err := filepath.Abs(cfg.WorkDir)
 	if err != nil {
 		log.Fatalf("解析工作区路径失败: %v", err)
 	}
@@ -62,12 +62,15 @@ func runMain() int {
 	fmt.Printf("📁 默认工作目录: %s\n", workDir)
 	fmt.Println("==================================================")
 
-	var realProvider provider.LLMProvider
-	modelName := "gpt-5.6-sol"
-	realProvider = provider.NewOpenAIProvider(modelName)
+	realProvider, err := provider.NewConfigured(cfg.Provider, cfg.Model, cfg.BaseURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Provider 配置错误:", err)
+		return 2
+	}
+	modelName := cfg.Model
 
 	// 获取持久化 Session
-	sess := ctxpkg.GlobalSessionMgr.GetOrCreate(*sessionPtr, workDir)
+	sess := ctxpkg.GlobalSessionMgr.GetOrCreate(cfg.SessionID, workDir)
 	// 【全息监控装配】：用 Cost Tracker 将真实大脑包裹起来
 	trackedProvider := observability.NewCostTracker(realProvider, modelName, sess)
 
@@ -85,7 +88,7 @@ func runMain() int {
 
 	// 关闭慢思考 (EnableThinking=false)：每轮只发一次带工具的 LLM 调用；
 	// 置 true 则每轮先做一次无工具规划再行动，LLM 调用次数翻倍
-	eng := engine.NewAgentEngine(trackedProvider, registry, false, true)
+	eng := engine.NewAgentEngine(trackedProvider, registry, cfg.Thinking, cfg.PlanMode)
 
 	// 【信号处理】：Ctrl+C / SIGTERM 取消根 context。
 	// Provider 链路透传 ctx，正在执行的 LLM 请求会被立即打断，随后走统一收尾
@@ -93,24 +96,8 @@ func runMain() int {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 【全息追踪装配】：Root Span 覆盖整个进程生命周期。
-	// 交互模式下每轮的 Agent.Run 会作为子 Span 级联进来，退出时导出完整聚合链路；
-	// 引擎内部每轮结束还会自行导出一份单轮 trace，两者互补。
-	spanName := "CLI.TaskRun"
-	if interactive {
-		spanName = "CLI.ReplSession"
-	}
-	ctx, rootSpan := observability.StartSpan(rootCtx, spanName)
-	rootSpan.AddAttribute("SessionID", sess.ID)
-	rootSpan.AddAttribute("Interactive", interactive)
-	if !interactive {
-		rootSpan.AddAttribute("Prompt", *promptPtr)
-	}
+	ctx := rootCtx
 	procStart := time.Now()
-	defer func() {
-		rootSpan.EndSpan()
-		_ = observability.ExportTraceToFile(rootSpan, workDir, sess.ID)
-	}()
 
 	// 5. 初始化彩色终端输出器
 	reporter := engine.NewTerminalReporter()
@@ -121,15 +108,15 @@ func runMain() int {
 
 	if interactive {
 		// 6. 交互对话模式：读一行、跑一轮，直到用户主动退出
-		runREPL(ctx, eng, sess, reporter, modelName)
+		runREPL(ctx, eng, sess, reporter, modelName, opts)
 		printSummary("👋 会话结束", procStart, sess)
 		return 0
 	} else {
 		// 6. 发起冲锋：单任务模式，行为与历史版本保持一致
-		fmt.Printf("\n🎯 收到任务: %s\n\n", *promptPtr)
+		fmt.Printf("\n🎯 收到任务: %s\n\n", cfg.Prompt)
 		// 将用户的 Prompt 压入 Session 记忆
 
-		result, err := eng.Submit(ctx, sess, *promptPtr, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
+		result, err := eng.Submit(ctx, sess, cfg.Prompt, reporter, opts)
 		if code := reportSingleRun(os.Stdout, result, err); code != 0 {
 			printSummary("任务结束", procStart, sess)
 			return code
@@ -140,11 +127,14 @@ func runMain() int {
 }
 
 func reportSingleRun(out io.Writer, result runpkg.Result, err error) int {
+	if result.TraceError != "" {
+		fmt.Fprintf(out, "⚠️ Trace 导出失败: %s\n", result.TraceError)
+	}
 	if err != nil {
-		fmt.Fprintf(out, "\n💥 运行失败 | RunID: %s | 原因: %s | 错误: %v\n", result.RunID, result.Reason, err)
+		fmt.Fprintf(out, "\n💥 运行失败 | RunID: %s | 原因: %s | 本轮费用: %s | 错误: %v\n", result.RunID, result.Reason, result.Budget.CostLabel(), err)
 		return 1
 	}
-	fmt.Fprintf(out, "\n✅ RunID: %s | 原因: %s\n", result.RunID, result.Reason)
+	fmt.Fprintf(out, "\n✅ RunID: %s | 原因: %s | 本轮费用: %s | 已知 Token: %d | 待核对预留: %d\n", result.RunID, result.Reason, result.Budget.CostLabel(), result.Budget.UsedTokens, result.Budget.ReservedTokens)
 	return 0
 }
 
@@ -152,7 +142,7 @@ func reportSingleRun(out io.Writer, result runpkg.Result, err error) int {
 // 多轮上下文由 Session 历史天然承接 —— 引擎的 Run 是可重入的，
 // 每次 Run 从 GetWorkingMemory 取最近上下文，跑到模型不再调用工具即返回。
 // 斜杠命令（/help /cost 等）在本地拦截处理：不进 Session、不调用 LLM、不计费。
-func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session, reporter engine.Reporter, modelName string) {
+func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session, reporter engine.Reporter, modelName string, opts runpkg.Options) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// 独立 goroutine 负责 stdin：主循环同时 select 退出信号与用户输入，互不阻塞
@@ -174,7 +164,7 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 	// 上一轮消耗增量（/cost 展示用，轮末由 submitTurn 更新）
 	var (
 		hasLastTurn         bool
-		lastDeltaCost       float64
+		lastDeltaCost       string
 		lastDeltaPrompt     int
 		lastDeltaCompletion int
 	)
@@ -196,10 +186,10 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 		"/exit": func(string) bool { return false },
 		"/cost": func(string) bool {
 			usage := sess.UsageSnapshot()
-			fmt.Printf("💰 Session 累计消耗: ¥%.6f | Token: Input %d, Output %d\n",
-				usage.TotalCostCNY, usage.TotalPromptTokens, usage.TotalCompletionTokens)
+			fmt.Printf("💰 Session 累计消耗: %s | Token: Input %d, Output %d\n",
+				usage.CostLabel(), usage.TotalPromptTokens, usage.TotalCompletionTokens)
 			if hasLastTurn {
-				fmt.Printf("   上一轮增量: ¥%.6f | Token: Input %d, Output %d\n\n",
+				fmt.Printf("   上一轮增量: %s | Token: Input %d, Output %d\n\n",
 					lastDeltaCost, lastDeltaPrompt, lastDeltaCompletion)
 			} else {
 				fmt.Println("   上一轮增量: 尚无已完成的轮次")
@@ -214,15 +204,15 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 			fmt.Printf("   工作区: %s\n", sess.WorkDir)
 			fmt.Printf("   模型: %s | 思考模式: %v | 计划模式: %v\n", modelName, eng.EnableThinking, eng.PlanMode)
 			fmt.Printf("   历史消息: %d 条\n", sess.MessageCount())
-			fmt.Printf("   累计消耗: ¥%.6f | Token: Input %d, Output %d\n\n",
-				usage.TotalCostCNY, usage.TotalPromptTokens, usage.TotalCompletionTokens)
+			fmt.Printf("   累计消耗: %s | Token: Input %d, Output %d\n\n",
+				usage.CostLabel(), usage.TotalPromptTokens, usage.TotalCompletionTokens)
 			return true
 		},
 		"/clear": func(string) bool {
 			usage := sess.UsageSnapshot()
 			n := sess.MessageCount()
 			sess.ResetHistory()
-			fmt.Printf("🧹 已清空 %d 条对话上下文（累计消耗 ¥%.6f 保留）\n\n", n, usage.TotalCostCNY)
+			fmt.Printf("🧹 已清空 %d 条对话上下文（累计消耗 %s 保留）\n\n", n, usage.CostLabel())
 			return true
 		},
 	}
@@ -236,29 +226,35 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 		before := sess.UsageSnapshot()
 
 		turnStart := time.Now()
-		result, err := eng.Submit(ctx, sess, content, reporter, runpkg.Options{MaxTurns: 20, Timeout: 5 * time.Minute})
+		result, err := eng.Submit(ctx, sess, content, reporter, opts)
 
 		// 失败轮也可能已产生若干次成功的 LLM 调用（已计入累计账单），
 		// 因此增量统计不区分成败，保证 /cost 的增量与累计值口径一致
 		after := sess.UsageSnapshot()
 		hasLastTurn = true
-		lastDeltaCost = after.TotalCostCNY - before.TotalCostCNY
+		lastDeltaCost = usageDifference(after, before).CostLabel()
 		lastDeltaPrompt = after.TotalPromptTokens - before.TotalPromptTokens
 		lastDeltaCompletion = after.TotalCompletionTokens - before.TotalCompletionTokens
 
 		if err != nil {
+			if result.TraceError != "" {
+				fmt.Printf("⚠️ Trace 导出失败: %s\n", result.TraceError)
+			}
 			if ctx.Err() != nil {
 				// 被信号打断：本轮作废，直接进入收尾
 				fmt.Println("\n⚠️ 收到退出信号，正在收尾...")
 				return true
 			}
 			// 可恢复错误（如 API 抖动）：打印后继续对话，绝不杀掉整个会话
-			fmt.Printf("💥 本轮执行失败 | RunID: %s | 原因: %s | 错误: %v（会话已保留，可继续输入）\n\n", result.RunID, result.Reason, err)
+			fmt.Printf("💥 本轮执行失败 | RunID: %s | 原因: %s | 本轮费用: %s | 错误: %v（会话已保留，可继续输入）\n\n", result.RunID, result.Reason, result.Budget.CostLabel(), err)
 			return false
 		}
-		fmt.Printf("✅ RunID: %s | 原因: %s | 本轮耗时: %v | 本轮消耗: ¥%.6f (In %d / Out %d tk) | Session 累计: ¥%.6f\n\n",
+		if result.TraceError != "" {
+			fmt.Printf("⚠️ Trace 导出失败: %s\n", result.TraceError)
+		}
+		fmt.Printf("✅ RunID: %s | 原因: %s | 本轮耗时: %v | 本轮消耗: %s (In %d / Out %d tk) | 本轮预算: %s | Session 累计: %s\n\n",
 			result.RunID, result.Reason, time.Since(turnStart).Round(time.Millisecond), lastDeltaCost, lastDeltaPrompt,
-			lastDeltaCompletion, after.TotalCostCNY)
+			lastDeltaCompletion, result.Budget.CostLabel(), after.CostLabel())
 		return false
 	}
 
@@ -375,7 +371,19 @@ func printSummary(title string, procStart time.Time, sess *ctxpkg.Session) {
 	usage := sess.UsageSnapshot()
 	fmt.Println("\n==================================================")
 	fmt.Printf("%s。总耗时: %v\n", title, time.Since(procStart).Round(time.Millisecond))
-	fmt.Printf("💰 Session 累计消耗: ¥%.6f | Token: Input %d, Output %d\n",
-		usage.TotalCostCNY, usage.TotalPromptTokens, usage.TotalCompletionTokens)
+	fmt.Printf("💰 Session 累计消耗: %s | Token: Input %d, Output %d\n",
+		usage.CostLabel(), usage.TotalPromptTokens, usage.TotalCompletionTokens)
 	fmt.Println("==================================================")
+}
+
+func usageDifference(after, before ctxpkg.UsageSnapshot) ctxpkg.UsageSnapshot {
+	delta := ctxpkg.UsageSnapshot{TotalPromptTokens: after.TotalPromptTokens - before.TotalPromptTokens,
+		TotalCompletionTokens: after.TotalCompletionTokens - before.TotalCompletionTokens,
+		UnknownCostRequests:   after.UnknownCostRequests - before.UnknownCostRequests,
+		UnknownUsageRequests:  after.UnknownUsageRequests - before.UnknownUsageRequests,
+		KnownCostMicros:       make(map[string]int64)}
+	for currency, amount := range after.KnownCostMicros {
+		delta.KnownCostMicros[currency] = amount - before.KnownCostMicros[currency]
+	}
+	return delta
 }
