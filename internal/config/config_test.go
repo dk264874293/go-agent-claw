@@ -66,11 +66,24 @@ func TestParseRejectsInvalidConfigurationBeforeRun(t *testing.T) {
 		{"无效时限", []string{"-timeout", "0s"}},
 		{"无效 Token", []string{"-max-total-tokens", "0"}},
 		{"无效布尔", []string{"-thinking=maybe"}},
+		{"宿主后端", []string{"-executor", "host"}},
+		{"无限制权限", []string{"-permissions", "all"}},
+		{"自动审批", []string{"-approval", "auto"}},
+		{"无界内存", []string{"-shell-memory-mb", "0"}},
+		{"无界进程", []string{"-shell-pids", "0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Parse(tc.args, func(string) string { return "" }, Defaults()); err == nil {
 				t.Fatal("无效配置被接受")
 			}
 		})
+	}
+}
+
+func TestPermissionEnvironmentPrecedence(t *testing.T) {
+	env := map[string]string{"CLAW_PERMISSIONS": "read-only", "CLAW_APPROVAL": "deny", "CLAW_ALLOW_NETWORK": "true", "CLAW_SHELL_MEMORY_MB": "128"}
+	cfg, err := Parse([]string{"-allow-network=false"}, func(key string) string { return env[key] }, Defaults())
+	if err != nil || cfg.Permissions != "read-only" || cfg.ApprovalMode != "deny" || cfg.AllowNetwork || cfg.ShellMemoryMB != 128 {
+		t.Fatalf("权限配置错误: %+v %v", cfg, err)
 	}
 }

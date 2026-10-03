@@ -13,10 +13,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 
 	"github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/workspace"
 )
 
 // ReadFileTool 实现了读取本地文件内容的工具
@@ -77,36 +76,18 @@ func (t *ReadFileTool) ExecuteDetailed(ctx context.Context, args json.RawMessage
 	if input.Path == "" {
 		return "", meta, fmt.Errorf("path 不能为空")
 	}
-	root, err := os.OpenRoot(t.workDir)
+	root, err := workspace.Open(t.workDir)
 	if err != nil {
 		return "", meta, fmt.Errorf("打开工作目录失败: %w", err)
 	}
 	defer root.Close()
-	file, err := openRegular(root, input.Path)
-	if err != nil {
-		return "", meta, fmt.Errorf("打开文件失败: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", meta, err
-	}
-	if !info.Mode().IsRegular() {
-		return "", meta, fmt.Errorf("仅支持读取常规文件")
-	}
-	if err := ctx.Err(); err != nil {
-		return "", meta, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxOutputBytes+1))
+	data, truncated, err := root.Read(ctx, input.Path, maxOutputBytes)
 	if err != nil {
 		return "", meta, fmt.Errorf("读取文件失败: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return "", meta, err
 	}
-	meta.Truncated = len(data) > maxOutputBytes
-	if meta.Truncated {
-		data = data[:maxOutputBytes]
-	}
+	meta.Truncated = truncated
 	return outputText(data, meta.Truncated), meta, nil
 }

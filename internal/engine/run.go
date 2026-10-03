@@ -10,6 +10,7 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/budget"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
@@ -49,6 +50,7 @@ func (e *AgentEngine) runQueued(ctx context.Context, session *ctxpkg.Session, re
 	runCtx = tools.WithExecutionOptions(runCtx, tools.ExecutionOptions{Timeout: opts.ToolTimeout, MaxConcurrent: opts.MaxConcurrentTools})
 	runCtx = budget.WithLedger(runCtx, ledger)
 	runCtx = provider.WithMaxOutputTokens(runCtx, opts.MaxOutputTokens)
+	runCtx = policy.WithIdentity(runCtx, id, session.ID)
 	runCtx, rootSpan := observability.StartSpan(runCtx, "Agent.Run")
 	rootSpan.AddAttribute("RunID", id)
 	rootSpan.AddAttribute("SessionID", session.ID)
@@ -213,7 +215,7 @@ func (e *AgentEngine) runQueued(ctx context.Context, session *ctxpkg.Session, re
 				results[i].Output = e.recovery.AnalyzeAndInject(actionResp.ToolCalls[i].Name, results[i].Output)
 			}
 			meta := results[i].ToolMetadata
-			observations[i] = schema.Message{Role: schema.RoleUser, Content: results[i].Output, ToolCallID: actionResp.ToolCalls[i].ID, ToolMetadata: &meta}
+			observations[i] = schema.Message{Role: schema.RoleUser, Content: externalObservation(results[i].Output), ToolCallID: actionResp.ToolCalls[i].ID, ToolMetadata: &meta}
 		}
 		for i, call := range actionResp.ToolCalls {
 			if reporter != nil {

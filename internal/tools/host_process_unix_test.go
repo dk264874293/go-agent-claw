@@ -27,7 +27,3 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	}
 	return err
 }
-
-func openRegular(root *os.Root, path string) (*os.File, error) {
-	return root.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-}

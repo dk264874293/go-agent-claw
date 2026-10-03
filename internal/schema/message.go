@@ -56,9 +56,13 @@ type ToolResult struct {
 
 // ToolMetadata 保留工具执行中不应仅靠文本判断的状态。
 type ToolMetadata struct {
-	Truncated bool `json:"truncated,omitempty"`
-	TimedOut  bool `json:"timed_out,omitempty"`
-	Cancelled bool `json:"cancelled,omitempty"`
+	Truncated           bool `json:"truncated,omitempty"`
+	TimedOut            bool `json:"timed_out,omitempty"`
+	Cancelled           bool `json:"cancelled,omitempty"`
+	Denied              bool `json:"denied,omitempty"`
+	ApprovalUnavailable bool `json:"approval_unavailable,omitempty"`
+	ApprovalRejected    bool `json:"approval_rejected,omitempty"`
+	ResourceExhausted   bool `json:"resource_exhausted,omitempty"`
 }
 
 // ToolDefinition 描述了一个大模型可以调用的工具元信息 (供模型理解工具有什么用)

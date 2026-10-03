@@ -18,11 +18,11 @@ import (
 )
 
 func TestShellLargeSuccessAndFailure(t *testing.T) {
-	r := NewRegistry()
-	r.Register(NewBashTool(t.TempDir()))
+	r := newExecutionTestRegistry()
+	r.Register(newHostBashTool(t.TempDir()))
 	for _, code := range []int{0, 7} {
 		args, _ := json.Marshal(map[string]string{"command": fmt.Sprintf("i=0; while [ $i -lt 5000 ]; do printf '输出很多字符'; i=$((i+1)); done; exit %d", code)})
-		result := r.Execute(context.Background(), schema.ToolCall{ID: "shell", Name: "bash", Arguments: args})
+		result := r.Execute(executionTestContext(context.Background()), schema.ToolCall{ID: "shell", Name: "bash", Arguments: args})
 		if result.IsError != (code != 0) || !result.Truncated || len(result.Output) > maxOutputBytes+100 {
 			t.Fatalf("大输出结果不正确: bytes=%d meta=%+v error=%v", len(result.Output), result.ToolMetadata, result.IsError)
 		}
@@ -33,12 +33,12 @@ func TestShellLargeSuccessAndFailure(t *testing.T) {
 }
 
 func TestShellCancellationKillsProcessGroup(t *testing.T) {
-	r := NewRegistry()
-	r.Register(NewBashTool(t.TempDir()))
+	r := newExecutionTestRegistry()
+	r.Register(newHostBashTool(t.TempDir()))
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	result := r.Execute(ctx, schema.ToolCall{ID: "kill", Name: "bash", Arguments: json.RawMessage(`{"command":"sleep 30 & printf 'CHILD=%s\\n' $!; wait"}`)})
+	result := r.Execute(executionTestContext(ctx), schema.ToolCall{ID: "kill", Name: "bash", Arguments: json.RawMessage(`{"command":"sleep 30 & printf 'CHILD=%s\\n' $!; wait"}`)})
 	if time.Since(start) > 2*time.Second || !result.IsError || !result.TimedOut {
 		t.Fatalf("未及时取消进程组: %+v", result)
 	}
@@ -46,7 +46,7 @@ func TestShellCancellationKillsProcessGroup(t *testing.T) {
 }
 
 func TestShellExitCleansBackgroundChild(t *testing.T) {
-	tool := NewBashTool(t.TempDir())
+	tool := newHostBashTool(t.TempDir())
 	start := time.Now()
 	output, _ := tool.Execute(context.Background(), json.RawMessage(`{"command":"sleep 30 >/dev/null 2>&1 & printf 'CHILD=%s\\n' $!"}`))
 	if time.Since(start) > 2*time.Second {
@@ -56,7 +56,7 @@ func TestShellExitCleansBackgroundChild(t *testing.T) {
 }
 
 func TestShellExitClosesInheritedPipe(t *testing.T) {
-	tool := NewBashTool(t.TempDir())
+	tool := newHostBashTool(t.TempDir())
 	start := time.Now()
 	output, err := tool.Execute(context.Background(), json.RawMessage(`{"command":"sleep 30 & printf 'CHILD=%s\\n' $!"}`))
 	if time.Since(start) > 2*time.Second {

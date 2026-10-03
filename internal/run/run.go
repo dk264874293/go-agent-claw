@@ -9,7 +9,7 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/budget"
 )
 
-const ConfigSchemaVersion = "m3-v1"
+const ConfigSchemaVersion = "s2-v1"
 
 // Options 定义单次运行的硬性轮数和时间上限。
 type Options struct {

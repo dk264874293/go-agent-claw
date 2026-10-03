@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -16,7 +17,10 @@ type scheduledTool struct {
 	fn       func(context.Context, json.RawMessage) (string, error)
 }
 
-func (t scheduledTool) Name() string                      { return t.name }
+func (t scheduledTool) Name() string { return t.name }
+func (t scheduledTool) RequiredCapabilities() []policy.Capability {
+	return []policy.Capability{policy.ReadWorkspace}
+}
 func (t scheduledTool) Definition() schema.ToolDefinition { return schema.ToolDefinition{Name: t.name} }
 func (t scheduledTool) ReadOnly() bool                    { return t.readOnly }
 func (t scheduledTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {

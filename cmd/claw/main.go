@@ -16,8 +16,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dk264874293/go-agent-claw/internal/approval"
 	"github.com/dk264874293/go-agent-claw/internal/config"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/executor"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	// "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
@@ -69,22 +72,22 @@ func runMain() int {
 	}
 	modelName := cfg.Model
 
-	// 获取持久化 Session
+	// 获取当前进程内的 Session
 	sess := ctxpkg.GlobalSessionMgr.GetOrCreate(cfg.SessionID, workDir)
 	// 【全息监控装配】：用 Cost Tracker 将真实大脑包裹起来
 	trackedProvider := observability.NewCostTracker(realProvider, modelName, sess)
 
-	// 3. 初始化工具与执行层
-	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(workDir))
-	registry.Register(tools.NewWriteFileTool(workDir))
-	registry.Register(tools.NewBashTool(workDir))
-	registry.Register(tools.NewEditFileTool(workDir))
-
-	// 为 Subagent 准备探索工具；通用 Bash 尚无只读隔离。
-	readOnlyRegistry := tools.NewRegistry()
-	readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
-	readOnlyRegistry.Register(tools.NewBashTool(workDir))
+	shell, err := executor.NewDocker(cfg.ExecutorOptions())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "执行后端配置错误:", err)
+		return 2
+	}
+	var approver policy.Approver
+	if cfg.ApprovalMode == "local" {
+		approver = approval.NewLocal()
+	}
+	registry := tools.NewWorkspaceRegistry(workDir, cfg.ToolPolicy(), approver, shell, cfg.AllowNetwork)
+	readOnlyRegistry := tools.NewReadOnlyRegistry(workDir)
 
 	// 关闭慢思考 (EnableThinking=false)：每轮只发一次带工具的 LLM 调用；
 	// 置 true 则每轮先做一次无工具规划再行动，LLM 调用次数翻倍
@@ -147,18 +150,27 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 	defer cancel()
 	// 独立 goroutine 负责 stdin：主循环同时 select 退出信号与用户输入，互不阻塞
 	lines := make(chan string)
+	readRequests := make(chan struct{})
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
 		// Scanner 默认 64KB 上限，粘贴长文本会报 token too long，扩容到 1MB
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
+		defer close(lines)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-readRequests:
+			}
+			if !scanner.Scan() {
+				return
+			}
 			select {
 			case lines <- scanner.Text():
 			case <-ctx.Done():
 				return
 			}
 		}
-		close(lines) // Ctrl+D (EOF)
 	}()
 
 	// 上一轮消耗增量（/cost 展示用，轮末由 submitTurn 更新）
@@ -277,6 +289,11 @@ func runREPL(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session,
 		}
 
 		var line string
+		select {
+		case <-ctx.Done():
+			return
+		case readRequests <- struct{}{}:
+		}
 		select {
 		case <-ctx.Done():
 			fmt.Println("\n⚠️ 收到退出信号，正在收尾...")

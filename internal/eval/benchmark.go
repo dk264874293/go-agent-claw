@@ -17,10 +17,13 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/dk264874293/go-agent-claw/internal/approval"
 	"github.com/dk264874293/go-agent-claw/internal/config"
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/executor"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -54,6 +57,7 @@ type BenchmarkRunner struct {
 func NewBenchmarkRunner(model string) *BenchmarkRunner {
 	cfg := config.Defaults()
 	cfg.Provider, cfg.Model = "zhipu-openai", model
+	cfg.ApprovalMode = "deny"
 	cfg.BaseURL = provider.DefaultURL(cfg.Provider)
 	opts, _ := cfg.RunOptions()
 	return &BenchmarkRunner{modelName: model, config: cfg, options: opts}
@@ -125,11 +129,15 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	session := ctxpkg.NewSession(tc.ID, workDir) // 为本次跑分单独建一个 Session 记账
 	trackedProvider := observability.NewCostTracker(realProvider, b.modelName, session)
 
-	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(workDir))
-	registry.Register(tools.NewWriteFileTool(workDir))
-	registry.Register(tools.NewBashTool(workDir))
-	registry.Register(tools.NewEditFileTool(workDir))
+	shell, executorErr := executor.NewDocker(b.config.ExecutorOptions())
+	if executorErr != nil {
+		return TestResult{TestCaseID: tc.ID, ErrorMsg: executorErr.Error(), CostLabel: "未知"}
+	}
+	var approver policy.Approver
+	if b.config.ApprovalMode == "local" {
+		approver = approval.NewLocal()
+	}
+	registry := tools.NewWorkspaceRegistry(workDir, b.config.ToolPolicy(), approver, shell, b.config.AllowNetwork)
 
 	eng := engine.NewAgentEngine(trackedProvider, registry, b.config.Thinking, b.config.PlanMode)
 

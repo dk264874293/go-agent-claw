@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	runpkg "github.com/dk264874293/go-agent-claw/internal/run"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -33,6 +34,9 @@ type fakeTool struct {
 }
 
 func (t fakeTool) Name() string { return t.name }
+func (t fakeTool) RequiredCapabilities() []policy.Capability {
+	return []policy.Capability{policy.ReadWorkspace}
+}
 func (t fakeTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{Name: t.name}
 }

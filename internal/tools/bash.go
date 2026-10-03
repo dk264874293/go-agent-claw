@@ -12,20 +12,35 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
+	"github.com/dk264874293/go-agent-claw/internal/executor"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
 type BashTool struct {
-	workDir string // 进程默认工作目录，不构成文件访问边界
+	workDir  string
+	executor executor.Executor
+	network  bool
 }
 
 func NewBashTool(workDir string) *BashTool {
-	return &BashTool{workDir: workDir}
+	backend, _ := executor.NewDocker(executor.Defaults())
+	return NewBashToolWithExecutor(workDir, backend, false)
+}
+
+func NewBashToolWithExecutor(workDir string, backend executor.Executor, network bool) *BashTool {
+	return &BashTool{workDir: workDir, executor: backend, network: network}
+}
+
+func (t *BashTool) RequiredCapabilities() []policy.Capability {
+	capabilities := []policy.Capability{policy.ReadWorkspace, policy.WriteWorkspace, policy.ExecuteProcess}
+	if t.network {
+		capabilities = append(capabilities, policy.Network)
+	}
+	return capabilities
 }
 
 func (t *BashTool) Name() string {
@@ -35,7 +50,7 @@ func (t *BashTool) Name() string {
 func (t *BashTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        t.Name(),
-		Description: "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)。返回标准输出(stdout)和标准错误(stderr)。",
+		Description: "经审批后在 Linux 容器的 /workspace 中执行 bash 命令；网络由运行配置决定，后端不可用时拒绝执行。返回有界的标准输出和错误。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -58,7 +73,7 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	return output, err
 }
 
-// ExecuteDetailed 在有界缓冲中收集输出，并在结束时回收同组进程。
+// ExecuteDetailed 在有界缓冲中收集输出，由隔离后端在结束时回收容器。
 func (t *BashTool) ExecuteDetailed(ctx context.Context, args json.RawMessage) (string, schema.ToolMetadata, error) {
 	var input bashArgs
 	var meta schema.ToolMetadata
@@ -70,25 +85,14 @@ func (t *BashTool) ExecuteDetailed(ctx context.Context, args json.RawMessage) (s
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, ExecutionOptionsFrom(ctx).Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
-	cmd.Dir = t.workDir
-	if err := configureProcess(cmd); err != nil {
-		return "", meta, err
+	if t.executor == nil {
+		return "", meta, executor.ErrUnavailable
 	}
-	var buffer boundedOutput
-	cmd.Stdout, cmd.Stderr = &buffer, &buffer
-	err := cmd.Run()
-	// 正常退出也清理同组后台进程；主动脱离进程组需后续隔离后端治理。
-	_ = killProcessGroup(cmd)
-	output, truncated := buffer.snapshot()
-	meta.Truncated = truncated
-	if timeoutCtx.Err() != nil {
-		meta.TimedOut = errors.Is(timeoutCtx.Err(), context.DeadlineExceeded)
-		meta.Cancelled = errors.Is(timeoutCtx.Err(), context.Canceled)
-		return output, meta, fmt.Errorf("命令执行中断: %w", timeoutCtx.Err())
-	}
+	result, err := t.executor.Execute(timeoutCtx, executor.Request{WorkDir: t.workDir, Command: input.Command, Network: t.network})
+	meta = schema.ToolMetadata{Truncated: result.Truncated, TimedOut: result.TimedOut, Cancelled: result.Cancelled, ResourceExhausted: result.ResourceExhausted}
+	output := result.Output
 	if err != nil {
-		return output, meta, fmt.Errorf("命令执行失败: %w", err)
+		return output, meta, err
 	}
 	if output == "" {
 		output = "命令执行成功，无终端输出。"

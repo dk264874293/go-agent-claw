@@ -10,15 +10,16 @@
 - **单次运行上限**：每次 Run 返回 RunID、状态与终止原因；默认最多 20 轮、总超时 5 分钟（含排队）、单工具 30 秒、Token 预算 100000，每次模型请求最多输出 4096 Token。自定义工具仍须响应 context。
 - **上下文压缩器（Compactor）**：发给模型前对超长上下文做掩码/截断，保护最近消息不被远古日志吃光 token 预算。
 - **会话调度**：同一 Session 的用户消息和整次运行按登记顺序执行，等待可取消；不同 Session 可并发。
-- **输出与进程回收**：文件有界读取、Shell 有界缓冲保留前 8000 字节并标记截断；Linux/macOS 下取消及正常结束清理同组后台进程。主动脱离进程组仍需后续隔离治理。
+- **输出与进程回收**：文件有界读取、Shell 有界缓冲保留前 8000 字节并标记截断；容器在取消及正常结束后回收，清理失败会报告。
 - **并发工具执行**：连续且显式声明只读的工具默认最多 4 个并发；写入、Shell 和子任务按顺序执行。主子任务共用调度器，结果按原顺序回写。
-- **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出探索型子任务，在最多 10 轮内搜集信息并返回摘要；当前子任务仍有通用 Bash，尚无可靠的只读隔离。
+- **子智能体（Subagent）**：主智能体可通过 `spawn_subagent` 派出探索型子任务，在最多 10 轮内搜集信息并返回摘要；仅提供 read_file、list_files 和 search_text，运行时拒绝写入、进程执行和递归委派。
 - **错误自愈（RecoveryManager）**：工具报错在送回模型前自动诊断并注入"救援提示"，引导模型自我修正。
 - **死循环探测（ReminderInjector）**：对连续重复的工具调用做指纹识别，触发时注入严厉提醒打破局部执念。
 - **可观测性**：`CostTracker` 记录供应商返回的 Token Usage；配置匹配价目表时计算已知费用，缺失价格或 Usage 时标记未知。每次 Run 的 Trace 按 RunID 导出到 `<workDir>/.claw/traces`，导出错误会报告。
 - **计划模式（PlanMode）**：PromptComposer 按 `planMode` 开关组装不同的系统提示词，默认关闭。
 - **技能加载（SkillLoader）**：从工作区加载 Markdown 技能文件注入系统提示词。
 - **双 Provider 支持**：OpenAI 兼容路线（智谱 GLM）与 Anthropic 兼容路线（DeepSeek），一个接口随时切换。
+- **权限与审批**：工具必须声明能力，Registry 独立检查；写入和 Shell 需要本地终端逐次审批，无可信来源时拒绝。Shell 仅使用 Docker，不回退宿主机。
 - **工具中间件**：`registry.Use(...)` 可拦截工具调用，带理由拒绝，模型必须读该理由。
 - **基准测试（bench）**：`SetupScript / TaskPrompt / ValidateScript` 三段式评测 runner，客观给智能体打分。
 
@@ -34,11 +35,15 @@ internal/engine/            — AgentEngine：有上限的 ReAct 主循环 + 子
 internal/run/               — RunOptions、运行状态和终止原因
 internal/config/            — CLI/环境配置解析与 Run Options 转换
 internal/budget/            — 价目快照、Token/费用预留及结算
+internal/policy/            — 能力校验与审批请求绑定
+internal/approval/          — 可取消的本地终端审批
+internal/workspace/         — os.Root 文件读写边界
+internal/executor/          — Docker 容器执行与资源限制
 internal/engine/            — Reporter 接口 + TerminalReporter、ReminderInjector（防死循环）
 internal/context/           — Session（历史 + 工作记忆）、Compactor、RecoveryManager、
                               PromptComposer（系统提示词、计划模式）、技能加载器
 internal/tools/             — BaseTool 接口、支持中间件的 Registry、
-                              read/write/edit_file/bash 工具、子智能体工具
+                              read/write/edit_file、目录浏览、文本搜索、容器 Shell、子智能体工具
 internal/observability/     — CostTracker（包裹 provider，为 Session 计费）、Span 链路追踪，
                               导出到 <workDir>/.claw/traces
 internal/feishu/            — 飞书/Lark 机器人 + 审批流（入口为独立的 cmd/agentops）
@@ -56,6 +61,7 @@ internal/feishu/            — 飞书/Lark 机器人 + 审批流（入口为独
 ### 环境要求
 
 - Go 1.25+
+- Shell 需要本机 Linux Docker Engine；macOS 使用 Docker Desktop。配置的镜像必须提前安装，例如 `docker pull bash:5.2`。默认镜像只含 Bash 和基础命令，运行 Go 测试需由操作者选择包含 Go 的可信镜像。
 - CLI 需要 `OPENAI_API_KEY`；基准测试需要 `ZHIPU_API_KEY`，会真实调用 API
 - 选择其他 Provider 时分别设置 `ZHIPU_API_KEY` 或 `DEEPSEEK_API_KEY`；密钥只从环境变量读取，可选 `.env` 只补齐未设置的变量
 - 独立飞书服务需要 `ZHIPU_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`
@@ -73,7 +79,7 @@ go run ./cmd/claw -prompt "帮我阅读当前目录的代码并写一份总结" 
 go build ./cmd/... ./internal/...
 
 # 基准测试（会真实调用 LLM API，产生费用）
-go run ./cmd/bench
+go run ./cmd/bench -approval local
 ```
 
 > 不要使用 `go build ./...`：`workspace/` 是演示和运行产物目录，可能包含不能参与正式构建的草稿代码。`cmd/agentops` 是可编译的独立飞书服务。
@@ -90,8 +96,17 @@ go run ./cmd/bench
 | `-max-turns`、`-timeout`、`-tool-timeout`、`-max-concurrent-tools` | 轮数、总时限、工具时限、只读并发 | `20`、`5m`、`30s`、`4` |
 | `-max-total-tokens`、`-max-output-tokens` | 每 Run Token 预算、每请求输出上限 | `100000`、`4096` |
 | `-max-cost`、`-cost-currency`、`-pricing-file` | 可选费用预算、币种、显式价目表 | 均未设置 |
+| `-permissions` | `workspace` 或 `read-only` 能力集合 | `workspace` |
+| `-approval` | `local` 本地终端逐次确认或 `deny` 拒绝副作用操作 | `local` |
+| `-executor`、`-shell-image` | Shell 后端和已安装镜像 | `docker`、`bash:5.2` |
+| `-shell-cpus`、`-shell-memory-mb`、`-shell-pids` | 容器 CPU、内存 MiB、进程配额 | `1`、`256`、`64` |
+| `-allow-network` | 容器网络能力，启用后仍需逐次审批 | `false` |
 
-同名 `CLAW_*` 环境变量可设置上述 Provider、模型、地址、推理和预算字段；命令行参数优先。支持的 Provider 值为 `openai`、`zhipu-openai`、`zhipu-anthropic`、`deepseek-openai`、`deepseek-anthropic`。单任务运行结束会打印 RunID、终止原因与 Session 累计用量；失败时退出码非零。Session 只存在于当前进程内。
+同名 `CLAW_*` 环境变量可设置上述 Provider、模型、地址、推理、预算、权限和容器字段；命令行参数优先。支持的 Provider 值为 `openai`、`zhipu-openai`、`zhipu-anthropic`、`deepseek-openai`、`deepseek-anthropic`。单任务运行结束会打印 RunID、终止原因与 Session 累计用量；失败时退出码非零。Session 只存在于当前进程内。
+
+读取和探索无需 Docker。写入及命令执行在 `/dev/tty` 展示参数摘要与完整参数 SHA-256，输入 `yes` 批准该次调用；审批等待计入单工具超时。没有控制终端或设置 `-approval deny` 时拒绝。审批与拒绝只表示一次工具调用结果，模型随后无工具返回仍可能是技术性完成，应检查实际产物。
+
+容器只挂载指定工作区，默认禁用网络、使用非 root、只读根目录和资源限额。工作区中的所有文件仍可能被容器读取，因此请指定不含密钥的目录。原生文件工具禁止 `.env`、`.env.*`、`.git` 路径，并通过 `os.Root` 约束读写；硬链接、挂载点与拥有宿主权限的其他程序仍属于运行环境边界。这是学习原型，不能视为完整多租户沙箱。
 
 费用预算必须同时设置币种及与 Provider、地址、模型匹配的价目表。价目表由操作者提供，不内置推测价格。例如：
 
@@ -115,11 +130,17 @@ go run ./cmd/bench
 ### 运行测试
 
 ```bash
-go test ./internal/...
-go test ./cmd/claw
+go test ./cmd/... ./internal/...
+go test -race ./cmd/... ./internal/...
+go vet ./cmd/... ./internal/...
+go build ./cmd/... ./internal/...
+# 显式选择本机 Docker 验收，不调用 LLM；需提前安装 shell-image 默认镜像
+CLAW_TEST_DOCKER=1 go test -race ./internal/executor -run TestDockerIntegration -count=1 -v
+# 可选：Python 3 标准库伪终端交互验收，不占用用户终端、不调用真实 API
+python3 scripts/test-local-approval.py
 ```
 
-测试覆盖工作记忆、M1 运行边界、M2 排队与取消、工具调度、输出上限、Shell 进程回收、飞书提交/审批及账单快照；这些测试使用 Mock Provider，不调用真实 API。
+测试覆盖 M1–M3 的运行边界、排队与取消、预算与 Trace，以及阶段 2 的权限、文件越界、只读子任务、审批绑定与取消。CLI 综合测试构建真实二进制并使用本地 HTTP 伪网关；普通测试不依赖 Docker，不调用真实 API。容器验收额外覆盖非 root、网络禁用、配额、OOM、宿主测试秘密不可见、输出上限和取消回收。macOS Docker Desktop 已运行验证，目标原生 Linux 主机验收仍待执行。
 
 ## 🧠 工作原理
 
@@ -132,8 +153,8 @@ Session（绑定 WorkDir） ← GlobalSessionMgr.GetOrCreate
     ↓
 Provider（默认 gpt-5.6-sol，数云兼容网关）→ CostTracker 包裹 → trackedProvider
     ↓
-Registry：read_file / write_file / bash / edit_file + spawn_subagent
-readOnlyRegistry：read_file / bash（专供子智能体）
+Registry：read_file / list_files / search_text / write_file / edit_file / bash + spawn_subagent
+readOnlyRegistry：read_file / list_files / search_text（专供子智能体）
     ↓
 AgentEngine(trackedProvider, registry, enableThinking, planMode)
     ↓
@@ -169,7 +190,7 @@ eng.Submit(ctx, sess, prompt, reporter, cfg.RunOptions())
 
 主智能体调用 `spawn_subagent` 时，引擎拉起一个不依赖外部 Session 的一次性受限循环：
 
-- 挂载 `readOnlyRegistry`（read_file + bash）；通用 Bash 仍可写入工作区外文件，当前并不真正只读；
+- 挂载 `readOnlyRegistry`（read_file + list_files + search_text）；同时限制执行 context 的能力，拒绝写入、Shell、网络和递归委派；
 - 最多 10 个 Turn，继承父任务 context、工具超时和并发配置；
 - System Prompt 严厉警告必须用工具找答案、禁止凭空捏造；
 - 不再调用工具即视为汇报完成，返回纯文本摘要给主智能体。
@@ -179,7 +200,7 @@ eng.Submit(ctx, sess, prompt, reporter, cfg.RunOptions())
 ## 📊 可观测性
 
 - **CostTracker**：装饰器模式包裹 `LLMProvider`；每次请求前原子预留估算输入和输出上限，返回 Usage 后结算。Thinking、Action 与子任务共享一次 Run 的预算。缺失 Usage 时保留预留并停止后续请求；Session 同时记录已知金额和未知请求数。估算规则与版本记录在运行账本及请求记录中。
-- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `Agent.Run → Turn-N → LLM.Thinking / LLM.Action` 的树形结构，JSON 按 RunID 排他导出到 `<workDir>/.claw/traces/trace_<RunID>.json`。Trace 包含预算摘要和终止原因，不写完整提示词、工具参数或工具输出；导出失败保留原运行状态并报告错误。
+- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `Agent.Run → Turn-N → LLM.Thinking / LLM.Action` 的树形结构，JSON 按 RunID 排他导出到 `<workDir>/.claw/traces/trace_<RunID>.json`。Trace 包含预算摘要、终止原因及审批 ID、参数摘要哈希、主体和期限，不写完整提示词、工具参数或工具输出；导出失败保留原运行状态并报告错误。
 
 ## 🧰 基准测试（cmd/bench）
 
@@ -195,11 +216,13 @@ observability.TestCase{
 }
 ```
 
+评测默认 `-approval deny`，有写入的用例需要显式 `-approval local` 并在终端逐次确认。Setup/Validate 脚本是操作者提供的宿主测试脚本，不能用于不可信输入。
+
 内置两个用例：模糊替换准确性（edit_file）、代码阅读 + 单测生成综合能力。⚠️ 跑分会真实调用 LLM API，产生费用。
 
 ## 💬 飞书机器人（独立入口）
 
-`cmd/agentops` 是可编译的独立飞书 HTTP 服务，使用 `internal/feishu/` 的事件处理、Reporter 和审批管理。它与 CLI 分开启动；同会话运行已串行，审批等待受工具超时和 context 取消控制；全局队列容量、审批鉴权与跨会话隔离仍待实现，尚不适合多用户试点。
+`cmd/agentops` 是可编译的独立飞书 HTTP 服务，使用 `internal/feishu/` 的事件处理、Reporter 和审批管理。它与 CLI 分开启动；同会话运行已串行。当前默认 `read-only`、`deny`；旧卡片审批没有完整主体鉴权，因此不能为新权限层授权。即使显式配置工作区能力，写入和进程执行仍因缺少可信审批来源而拒绝。全局队列容量、远程审批鉴权与跨会话隔离仍待实现。
 
 ## 🔧 扩展指南
 
@@ -215,7 +238,9 @@ type BaseTool interface {
 }
 ```
 
-2. 在 `cmd/claw/main.go` 通过 `registry.Register(...)` 注册，引擎每轮动态感知。
+2. 实现 `RequiredCapabilities() []policy.Capability`；未声明能力的工具默认拒绝。声明只读工具还需 `ReadOnly() bool`，且仅使用读取能力。
+
+3. 在 `cmd/claw/main.go` 通过 `registry.Register(...)` 注册，引擎每轮动态感知。自行装配时用 `NewRegistryWithPolicy` 注入能力和可信审批来源；`NewRegistry` 没有审批来源，写入及进程执行默认拒绝。
 
 ### 新增 Provider
 
@@ -240,7 +265,7 @@ registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
 })
 ```
 
-中间件在工具执行前运行，可以带理由拒绝调用，模型必须读该理由。
+中间件在权限与审批检查后、工具执行前运行，可以带理由拒绝调用；它不能授予权限或代替审批。
 
 ## ⚠️ 已知坑点
 
@@ -248,7 +273,7 @@ registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
 - **包名怪癖**：`internal/eval/benchmark.go` 位于 `internal/eval/` 目录却声明 `package observability`。导入路径是 `internal/eval`，但引用时写作 `observability.*`。
 - **GLM 消息校验**：改动截断逻辑时必须保住 `ToolCall↔ToolResult` 配对，且首条非 system 消息必须是普通 user 消息。
 - **引擎构造签名**：`NewAgentEngine(provider, registry, enableThinking, planMode)`——thinking 阶段每轮发两次 LLM 调用（先不带工具做规划，再带工具行动）。
-- **飞书入口**：`cmd/agentops` 是独立 HTTP 服务；CLI 不会启动它。审批等待已支持超时与 context 取消，审批身份校验仍待实现。
+- **飞书入口**：`cmd/agentops` 是独立 HTTP 服务；CLI 不会启动它。当前入口默认只读；远程审批身份校验仍待实现。
 
 ## MIT 许可
 

@@ -14,8 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
+	"time"
 
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -51,12 +54,19 @@ type registryImpl struct {
 	// 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
 	tools       map[string]BaseTool
 	middlewares []MiddlewareFunc
+	policy      policy.Policy
+	approver    policy.Approver
 }
 
 func NewRegistry() Registry {
+	return NewRegistryWithPolicy(policy.Development(false), nil)
+}
+
+func NewRegistryWithPolicy(permissions policy.Policy, approver policy.Approver) Registry {
 	return &registryImpl{
 		tools:       make(map[string]BaseTool),
 		middlewares: make([]MiddlewareFunc, 0),
+		policy:      permissions, approver: approver,
 	}
 }
 
@@ -76,15 +86,31 @@ func (r *registryImpl) Register(tool BaseTool) {
 func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 	var defs []schema.ToolDefinition
 	for _, tool := range r.tools {
-		defs = append(defs, tool.Definition())
+		if declared, ok := tool.(capabilityTool); ok && r.policy.Check(context.Background(), declared.RequiredCapabilities()) == nil {
+			defs = append(defs, tool.Definition())
+		}
 	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
 	return defs
 }
 
 // CanRunConcurrently 仅信任已装配工具的显式只读声明。
 func (r *registryImpl) CanRunConcurrently(name string) bool {
 	tool, ok := r.tools[name].(interface{ ReadOnly() bool })
-	return ok && tool.ReadOnly()
+	declared, hasCapabilities := r.tools[name].(capabilityTool)
+	if !ok || !hasCapabilities || !tool.ReadOnly() {
+		return false
+	}
+	capabilities := declared.RequiredCapabilities()
+	if len(capabilities) == 0 {
+		return false
+	}
+	for _, capability := range capabilities {
+		if capability != policy.ReadWorkspace {
+			return false
+		}
+	}
+	return true
 }
 
 // detailedTool 在不改变 BaseTool 的前提下提供结构化执行元数据。
@@ -114,6 +140,10 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 		}
 		span.AddAttribute("output_bytes", len(result.Output))
 		span.AddAttribute("is_error", result.IsError)
+		span.AddAttribute("denied", result.Denied)
+		span.AddAttribute("approval_unavailable", result.ApprovalUnavailable)
+		span.AddAttribute("approval_rejected", result.ApprovalRejected)
+		span.AddAttribute("resource_exhausted", result.ResourceExhausted)
 		span.EndSpan()
 	}()
 	if ctx.Err() != nil {
@@ -121,9 +151,48 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	}
 	tool, exists := r.tools[call.Name]
 	if !exists {
-		result.IsError = true
+		result.IsError, result.Denied = true, true
 		result.Output = fmt.Sprintf("系统中不存在名为 %q 的工具", call.Name)
 		return result
+	}
+	declared, ok := tool.(capabilityTool)
+	if !ok {
+		result.IsError, result.Denied = true, true
+		result.Output = "权限拒绝：工具没有声明能力"
+		return result
+	}
+	capabilities := declared.RequiredCapabilities()
+	if err := r.policy.Check(ctx, capabilities); err != nil {
+		result.IsError, result.Denied = true, true
+		result.Output = err.Error()
+		return result
+	}
+	var request policy.Request
+	var grant policy.Grant
+	if policy.NeedsApproval(capabilities) {
+		if r.approver == nil || policy.IdentityFrom(ctx).RunID == "" {
+			result.IsError, result.Denied, result.ApprovalUnavailable = true, true, true
+			result.Output = policy.ErrApprovalUnavailable.Error()
+			return result
+		}
+		var err error
+		request, err = policy.NewRequest(ctx, call.Name, call.Arguments)
+		if err == nil {
+			span.AddAttribute("approval_id", request.ID)
+			span.AddAttribute("arguments_digest", request.ArgumentsDigest)
+			grant, err = r.approver.Approve(ctx, request)
+		}
+		if err == nil {
+			err = policy.Validate(request, grant, time.Now())
+		}
+		if err != nil {
+			result.IsError, result.Denied, result.ApprovalRejected = true, true, true
+			result.ApprovalUnavailable = errors.Is(err, policy.ErrApprovalUnavailable)
+			result.Output = fmt.Sprintf("审批未放行: %v", err)
+			return result
+		}
+		span.AddAttribute("approval_subject", grant.Subject)
+		span.AddAttribute("approval_expires_at", grant.ExpiresAt.UTC().Format(time.RFC3339Nano))
 	}
 	for _, middleware := range r.middlewares {
 		if ctx.Err() != nil {
@@ -138,6 +207,13 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	}
 	if ctx.Err() != nil {
 		return cancelledResult(ctx, call)
+	}
+	if policy.NeedsApproval(capabilities) {
+		if request.ArgumentsDigest != policy.Digest(call.Arguments) || policy.Validate(request, grant, time.Now()) != nil {
+			result.IsError, result.Denied, result.ApprovalRejected = true, true, true
+			result.Output = "审批参数已改变或授权已过期"
+			return result
+		}
 	}
 	var err error
 	if detailed, ok := tool.(detailedTool); ok {

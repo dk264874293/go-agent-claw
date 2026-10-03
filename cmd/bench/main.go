@@ -24,6 +24,7 @@ func main() {
 
 	defaults := config.Defaults()
 	defaults.Provider, defaults.Model = "zhipu-openai", "glm-4.7"
+	defaults.ApprovalMode = "deny"
 	cfg, err := config.Parse(os.Args[1:], os.Getenv, defaults)
 	if err != nil {
 		log.Fatalf("评测配置错误: %v", err)

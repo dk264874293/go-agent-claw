@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -36,6 +37,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 // 它不依赖外部 Session，打完就跑。
 // Reporter：为了让用户在终端看到子智能体的工作轨迹，我们将主线程的 Reporter 透传进来，并打上特殊标记。
 func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry tools.Registry, reporter any) (string, error) {
+	ctx = policy.Restrict(ctx, policy.ReadOnly())
 
 	// 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
 	contextHistory := []schema.Message{
@@ -45,7 +47,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。
 
 【核心纪律】
-1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！
+1. 你必须依靠 read_file、list_files、search_text 等只读工具寻找答案，不得写入文件、执行命令或递归委派。绝对不允许凭空捏造或猜测！
 2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。
 3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报来做下一步决策。`,
 		},
@@ -110,7 +112,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 				r.OnToolResult(ctx, "[Subagent] "+call.Name, toolPreview(result.Output), result.IsError)
 			}
 			meta := result.ToolMetadata
-			observationMsgs[i] = schema.Message{Role: schema.RoleUser, Content: result.Output, ToolCallID: call.ID, ToolMetadata: &meta}
+			observationMsgs[i] = schema.Message{Role: schema.RoleUser, Content: externalObservation(result.Output), ToolCallID: call.ID, ToolMetadata: &meta}
 		}
 		contextHistory = append(contextHistory, observationMsgs...)
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -18,6 +19,9 @@ type resultTool struct {
 }
 
 func (t resultTool) Name() string { return t.name }
+func (t resultTool) RequiredCapabilities() []policy.Capability {
+	return []policy.Capability{policy.ReadWorkspace}
+}
 func (t resultTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{Name: t.name}
 }
@@ -70,7 +74,7 @@ func TestRegistryRejectsCancelledContext(t *testing.T) {
 }
 
 func TestBashFailureKeepsStderr(t *testing.T) {
-	tool := NewBashTool(t.TempDir())
+	tool := newHostBashTool(t.TempDir())
 	output, err := tool.Execute(context.Background(), json.RawMessage(`{"command":"printf '诊断信息' >&2; exit 7"}`))
 	if err == nil || !strings.Contains(output, "诊断信息") {
 		t.Fatalf("Shell 失败应同时返回 stderr 和错误: output=%q err=%v", output, err)
