@@ -137,6 +137,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 ### Provider
 
 - Provider 必须完整保存 assistant 的文本、ToolCalls、ToolCall ID 和 Usage。
+- 空文本且无 ToolCalls、缺少/重复工具标识必须报错；异常响应中完整合法的 Usage 仍交给 Tracker 核算。Usage 只有输入和输出计数都存在且为非负整数时才标为已知，部分字段不能用 SDK 零值补齐。
 - 重放历史时必须把 assistant ToolCalls 和 tool result 的关联关系原样转换回供应商协议。
 - 添加 Provider 时实现 `LLMProvider.Generate(ctx, messages, tools)`，并确保 `context.Context` 能取消网络请求。
 - 不要在构造函数之外散落供应商 URL、模型名或环境变量读取逻辑。
@@ -174,6 +175,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 - Session 只存在于进程内存，`-session` 只能在当前进程内复用，不能实现重启后的历史恢复。
 - 不预置默认模型或网关的价格；费用只有在显式价目表匹配且供应商返回 Usage 时才显示确定金额，否则显示未知。Session 将不同币种分开汇总。
 - Trace 文件按随机 RunID 排他创建，目录/写入错误在运行结果中可见；它不含完整提示词、工具参数和输出，但仍是本地执行元数据，应按后续保留策略治理。
+- 子任务 Trace 位于委派工具的 `Agent.Subagent` 下，包含各轮 `LLM.Action`；它继承父 RunID/SessionID 和预算，不创建独立 Run 账本。
 
 不要向用户宣称会话已经持久化或成本已经准确，除非相关实现和测试已补齐。
 
@@ -187,6 +189,7 @@ workspace/                  演示、评测和运行产物，不属于正式模�
 
 - CLI 默认关闭 PlanMode；显式开启后，模型可能创建或修改工作区根目录下的 `PLAN.md`、`TODO.md`。
 - SkillLoader 对文件、遍历深度、数量及总注入大小设有上限，并标记外部来源；仍一次性加载符合限制的正文，没有按触发条件渐进加载。
+- AGENTS.md 和技能文件在字节上限处截断后会清理不完整 UTF-8，避免把损坏文本注入提示词。
 - 多数旧 Go 文件尚未统一 gofmt；修改文件时只格式化本次涉及的 Go 文件，避免无关大范围变更。
 - `.claw/`、`.zcode/`、`workspace/` 当前会显示为未跟踪目录。不要把运行生成的 trace、计划文件、评测工作区或二进制提交到仓库。
 - README 中仍可能存在智谱默认 Provider、环境变量和 Session 持久化等旧描述，修改相关功能时同步更新 README 与本文件。
@@ -233,4 +236,4 @@ go build ./cmd/... ./internal/...
 
 若修改 Session、并发执行、飞书并发或 CostTracker，再运行相关 `-race` 测试。若因为需要外部密钥、真实费用或缺少环境而没有执行某项验证，必须在交付说明中明确写出。
 
-容器验收需明确设置 `CLAW_TEST_DOCKER=1 go test -race ./internal/executor -run TestDockerIntegration -count=1 -v`，运行前准备已安装镜像。普通测试不依赖 daemon。
+容器验收需明确设置 `CLAW_TEST_DOCKER=1 go test -race ./internal/executor -run '^TestDocker(Integration|Acceptance)$' -count=1 -timeout=180s -v`，运行前准备已安装镜像。普通测试不依赖 daemon。完整交互验收使用 `python3 scripts/test-comprehensive-acceptance.py --evidence-dir <仓库外的新目录>`，需要本机 Docker；结果与剩余接入门槛见 `docs/acceptance/report-2026-10-04-macos.md`。

@@ -129,18 +129,24 @@ go run ./cmd/bench -approval local
 
 ### 运行测试
 
+完整步骤、覆盖缺口、真实模型与 Linux 门槛见 [综合验收方案](docs/acceptance/comprehensive-acceptance-plan.md)，结果使用 [验收报告模板](docs/acceptance/report-template.md) 记录。
+
+2026-10-04 的 [本地综合验收报告](docs/acceptance/report-2026-10-04-macos.md) 已完成 47 个必测项；真实模型接入和原生 Linux 部署仍待验收。
+
 ```bash
 go test ./cmd/... ./internal/...
 go test -race ./cmd/... ./internal/...
 go vet ./cmd/... ./internal/...
 go build ./cmd/... ./internal/...
 # 显式选择本机 Docker 验收，不调用 LLM；需提前安装 shell-image 默认镜像
-CLAW_TEST_DOCKER=1 go test -race ./internal/executor -run TestDockerIntegration -count=1 -v
+CLAW_TEST_DOCKER=1 go test -race ./internal/executor -run '^TestDocker(Integration|Acceptance)$' -count=1 -timeout=180s -v
 # 可选：Python 3 标准库伪终端交互验收，不占用用户终端、不调用真实 API
 python3 scripts/test-local-approval.py
+# 完整交互流程：需 Docker 可用；不调用真实 API，证据保存在仓库外新目录
+python3 scripts/test-comprehensive-acceptance.py --evidence-dir /tmp/claw-comprehensive-new
 ```
 
-测试覆盖 M1–M3 的运行边界、排队与取消、预算与 Trace，以及阶段 2 的权限、文件越界、只读子任务、审批绑定与取消。CLI 综合测试构建真实二进制并使用本地 HTTP 伪网关；普通测试不依赖 Docker，不调用真实 API。容器验收额外覆盖非 root、网络禁用、配额、OOM、宿主测试秘密不可见、输出上限和取消回收。macOS Docker Desktop 已运行验证，目标原生 Linux 主机验收仍待执行。
+测试覆盖 M1–M3 的运行边界、排队与取消、预算与 Trace，以及阶段 2 的权限、文件越界、只读子任务、审批绑定与取消。两类 Provider 使用本机伪服务验证多工具重放、实际 HTTP 取消和异常响应。完整交互脚本覆盖命令、多行/EOF、计划续接、子任务审批编辑、后端失败恢复和越权指令。容器验收覆盖非 root、CapEff/NoNewPrivs、挂载、受控网络对照、配额/OOM/PID 耗尽、后台与取消回收。普通 Go 测试不依赖 Docker；目标原生 Linux 主机验收仍待执行。
 
 ## 🧠 工作原理
 
@@ -200,7 +206,7 @@ eng.Submit(ctx, sess, prompt, reporter, cfg.RunOptions())
 ## 📊 可观测性
 
 - **CostTracker**：装饰器模式包裹 `LLMProvider`；每次请求前原子预留估算输入和输出上限，返回 Usage 后结算。Thinking、Action 与子任务共享一次 Run 的预算。缺失 Usage 时保留预留并停止后续请求；Session 同时记录已知金额和未知请求数。估算规则与版本记录在运行账本及请求记录中。
-- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `Agent.Run → Turn-N → LLM.Thinking / LLM.Action` 的树形结构，JSON 按 RunID 排他导出到 `<workDir>/.claw/traces/trace_<RunID>.json`。Trace 包含预算摘要、终止原因及审批 ID、参数摘要哈希、主体和期限，不写完整提示词、工具参数或工具输出；导出失败保留原运行状态并报告错误。
+- **Span 链路追踪**：`StartSpan` 通过 `context.Context` 级联父子关系，形成 `Agent.Run → Turn-N → LLM.Thinking / LLM.Action` 的树形结构。委派工具下的 `Agent.Subagent` 记录同一 RunID/SessionID 及子任务 `LLM.Action`，预算仍共用父 Run 账本。JSON 按 RunID 排他导出到 `<workDir>/.claw/traces/trace_<RunID>.json`。Trace 包含预算摘要、终止原因及审批 ID、参数摘要哈希、主体和期限，不写完整提示词、工具参数或工具输出；导出失败保留原运行状态并报告错误。
 
 ## 🧰 基准测试（cmd/bench）
 
