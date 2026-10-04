@@ -169,30 +169,19 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
 	if err != nil {
 		return nil, fmt.Errorf("OpenAI/Zhipu API 请求失败: %w", err)
 	}
+	resultMsg := &schema.Message{Role: schema.RoleAssistant, Usage: responseUsage(resp.RawJSON(), "prompt_tokens", "completion_tokens")}
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("API 返回了空的 Choices")
+		return resultMsg, fmt.Errorf("API 返回了空的 Choices")
 	}
 
 	// 4. 将 API Response 反向翻译为内部 schema.Message
 	choice := resp.Choices[0].Message
-	resultMsg := &schema.Message{
-		Role:    schema.RoleAssistant,
-		Content: choice.Content,
-	}
-
-	// 【新增】提取 Usage 信息
-	var raw struct {
-		Usage json.RawMessage `json:"usage"`
-	}
-	_ = json.Unmarshal([]byte(resp.RawJSON()), &raw)
-	if len(raw.Usage) > 0 && string(raw.Usage) != "null" {
-		resultMsg.Usage = &schema.Usage{
-			PromptTokens:     int(resp.Usage.PromptTokens),
-			CompletionTokens: int(resp.Usage.CompletionTokens),
-		}
-	}
+	resultMsg.Content = choice.Content
 
 	for _, tc := range choice.ToolCalls {
+		if tc.Type != "function" {
+			return resultMsg, fmt.Errorf("API 返回了不支持的工具调用类型: %s", tc.Type)
+		}
 		if tc.Type == "function" {
 			resultMsg.ToolCalls = append(resultMsg.ToolCalls, schema.ToolCall{
 				ID:        tc.ID,
@@ -202,7 +191,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
 		}
 	}
 
-	return resultMsg, nil
+	return resultMsg, validateResponse(resultMsg)
 }
 
 func (p *OpenAIProvider) EstimateInput(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (int64, error) {

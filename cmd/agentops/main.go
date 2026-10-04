@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +18,25 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
+
+// serviceConfig 把入口的默认权限和审批约束集中到可测试的装配路径。
+func serviceConfig(getenv func(string) string) (config.Config, error) {
+	defaults := config.Defaults()
+	defaults.Provider, defaults.Model = "zhipu-openai", "glm-4.5-air"
+	defaults.Permissions, defaults.ApprovalMode = "read-only", "deny"
+	cfg, err := config.Parse(nil, getenv, defaults)
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.ApprovalMode != "deny" {
+		return cfg, fmt.Errorf("飞书入口尚无主体鉴权审批，请设置 CLAW_APPROVAL=deny")
+	}
+	return cfg, nil
+}
+
+func serviceRegistry(workDir string, cfg config.Config, shell executor.Executor) tools.Registry {
+	return tools.NewWorkspaceRegistry(workDir, cfg.ToolPolicy(), nil, shell, cfg.AllowNetwork)
+}
 
 func main() {
 	// 加载 .env 文件
@@ -35,10 +55,7 @@ func main() {
 	}
 
 	// 2. 初始化底层大脑与注册表
-	defaults := config.Defaults()
-	defaults.Provider, defaults.Model = "zhipu-openai", "glm-4.5-air"
-	defaults.Permissions, defaults.ApprovalMode = "read-only", "deny"
-	cfg, err := config.Parse(nil, os.Getenv, defaults)
+	cfg, err := serviceConfig(os.Getenv)
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
 	}
@@ -52,14 +69,11 @@ func main() {
 		log.Fatalf("Provider 配置错误: %v", err)
 	}
 
-	if cfg.ApprovalMode != "deny" {
-		log.Fatal("飞书入口尚无主体鉴权审批，请设置 CLAW_APPROVAL=deny")
-	}
 	shell, err := executor.NewDocker(cfg.ExecutorOptions())
 	if err != nil {
 		log.Fatalf("执行后端配置错误: %v", err)
 	}
-	registry := tools.NewWorkspaceRegistry(workDir, cfg.ToolPolicy(), nil, shell, cfg.AllowNetwork)
+	registry := serviceRegistry(workDir, cfg, shell)
 	log.Println("已启用权限检查；写入和进程执行没有受信审批时拒绝。")
 
 	// 4. 动态 Factory 组装器：保证高并发调用的物理独立性与账单准确追踪

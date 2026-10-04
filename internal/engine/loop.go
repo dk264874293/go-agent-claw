@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/policy"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
@@ -38,6 +39,11 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 // Reporter：为了让用户在终端看到子智能体的工作轨迹，我们将主线程的 Reporter 透传进来，并打上特殊标记。
 func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry tools.Registry, reporter any) (string, error) {
 	ctx = policy.Restrict(ctx, policy.ReadOnly())
+	ctx, subSpan := observability.StartSpan(ctx, "Agent.Subagent")
+	defer subSpan.EndSpan()
+	identity := policy.IdentityFrom(ctx)
+	subSpan.AddAttribute("RunID", identity.RunID)
+	subSpan.AddAttribute("SessionID", identity.SessionID)
 
 	// 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
 	contextHistory := []schema.Message{
@@ -76,7 +82,10 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 		compactedContext := e.compactor.Compact(contextHistory)
 
 		// 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
-		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
+		actionCtx, actionSpan := observability.StartSpan(ctx, "LLM.Action")
+		actionSpan.AddAttribute("turn", turnCount)
+		actionResp, err := e.provider.Generate(actionCtx, compactedContext, availableTools)
+		actionSpan.EndSpan()
 		if err != nil {
 			return "", fmt.Errorf("子智能体推理失败: %w", err)
 		}

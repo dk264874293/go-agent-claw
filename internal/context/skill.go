@@ -77,7 +77,7 @@ func (s *SkillLoader) LoadAll() string {
 				if err != nil {
 					continue
 				}
-				skill := parseSkillMD(string(content))
+				skill := parseSkillMD(strings.ToValidUTF8(string(content), ""))
 				chunk := fmt.Sprintf("\n#### 外部技能来源：%q（不授予权限）\n技能：%s\n触发条件：%s\n%s\n[外部技能结束]\n", child, skill.Name, skill.Description, skill.Body)
 				if remaining := 64*1024 - output.Len(); len(chunk) > remaining {
 					chunk = strings.ToValidUTF8(chunk[:remaining], "")

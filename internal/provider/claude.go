@@ -146,19 +146,8 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
 
 	// 4. 反向解析
 	resultMsg := &schema.Message{
-		Role: schema.RoleAssistant,
-	}
-
-	// 【新增】提取 Usage 信息
-	var raw struct {
-		Usage json.RawMessage `json:"usage"`
-	}
-	_ = json.Unmarshal([]byte(resp.RawJSON()), &raw)
-	if len(raw.Usage) > 0 && string(raw.Usage) != "null" {
-		resultMsg.Usage = &schema.Usage{
-			PromptTokens:     int(resp.Usage.InputTokens),
-			CompletionTokens: int(resp.Usage.OutputTokens),
-		}
+		Role:  schema.RoleAssistant,
+		Usage: responseUsage(resp.RawJSON(), "input_tokens", "output_tokens"),
 	}
 
 	for _, block := range resp.Content {
@@ -175,7 +164,7 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
 		}
 	}
 
-	return resultMsg, nil
+	return resultMsg, validateResponse(resultMsg)
 }
 
 func (p *ClaudeProvider) EstimateInput(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (int64, error) {
