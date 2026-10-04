@@ -60,7 +60,7 @@ func TestCLIIntegration(t *testing.T) {
 					"usage":   map[string]any{"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}})
 			}))
 			defer server.Close()
-			args := []string{"-dir", dir, "-model", "mock", "-base-url", server.URL, "-max-output-tokens", "32", "-max-total-tokens", "100000"}
+			args := []string{"-dir", dir, "-model", "mock", "-base-url", server.URL, "-max-output-tokens", "32", "-max-total-tokens", "100000", "-timeout", "5s"}
 			if scenario == "权限拒绝" {
 				args = append(args, "-permissions", "read-only")
 			}
@@ -76,7 +76,9 @@ func TestCLIIntegration(t *testing.T) {
 			if scenario == "预算拒绝" {
 				args = append(args, "-max-total-tokens", "1")
 			}
-			runCtx, runCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			// 进程时限包含启动开销；任务本身仍由 CLI 的 5 秒时限约束。
+			// 并行构建/race 的机器负载不应被误判成模型或工具超时。
+			runCtx, runCancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer runCancel()
 			cmd := exec.CommandContext(runCtx, binary, args...)
 			cmd.Dir = dir
@@ -84,13 +86,17 @@ func TestCLIIntegration(t *testing.T) {
 			cmd.Stdin = strings.NewReader(input)
 			var out bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &out
+			started := time.Now()
 			err := cmd.Run()
 			if scenario == "预算拒绝" {
 				if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1 || !strings.Contains(out.String(), "token_budget") {
 					t.Fatalf("预算退出不正确: %v\n%s", err, out.String())
 				}
 			} else if err != nil {
-				t.Fatalf("CLI 运行失败: %v\n%s", err, out.String())
+				mu.Lock()
+				count := len(requests)
+				mu.Unlock()
+				t.Fatalf("CLI 运行失败: %v | 请求数: %d | 耗时: %s\n%s", err, count, time.Since(started), out.String())
 			}
 			mu.Lock()
 			defer mu.Unlock()
