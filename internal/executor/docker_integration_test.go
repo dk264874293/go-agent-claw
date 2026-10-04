@@ -47,6 +47,7 @@ test "$(cat /sys/fs/cgroup/pids.max)" = 64
 test "$(cat /sys/fs/cgroup/cpu.max)" = '100000 100000'
 if wget -T 2 -q -O /tmp/net http://1.1.1.1 2>/dev/null; then exit 31; fi
 printf '容器写入成功' > result.txt
+test "$(cat result.txt)" = '容器写入成功'
 printf '隔离检查通过'
 `
 	result, err := d.Execute(ctx, Request{WorkDir: dir, Command: command})

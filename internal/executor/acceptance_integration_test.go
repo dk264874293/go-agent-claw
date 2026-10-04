@@ -85,6 +85,7 @@ func TestDockerAcceptance(t *testing.T) {
 test "$(id -u)" -ne 0
 grep -Eq '^CapEff:[[:space:]]+0000000000000000$' /proc/self/status
 grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
+grep -Eq '^[^ ]+ / [^ ]+ ro(,| )' /proc/mounts
 test ! -e /var/run/docker.sock
 test ! -e /run/docker.sock
 grep -Eq ' /tmp .*nosuid.*nodev.*noexec.*size=16384k' /proc/mounts
