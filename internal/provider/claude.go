@@ -45,6 +45,18 @@ func NewZhipuClaudeProvider(model string) *ClaudeProvider {
 	}
 }
 
+func NewMimoAIProvider(model string) *ClaudeProvider {
+	apiKey := os.Getenv("MIMO_API_KEY")
+	if apiKey == "" {
+		panic("请设置 MIMO_API_KEY 环境变量")
+	}
+	baseURL := "https://api.xiaomimimo.com/anthropic"
+	return &ClaudeProvider{
+		client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+		model:  model,
+	}
+}
+
 func (p *ClaudeProvider) buildParams(msgs []schema.Message, availableTools []schema.ToolDefinition, outputLimit int) anthropic.MessageNewParams {
 	var anthropicMsgs []anthropic.MessageParam
 	var systemPrompt string

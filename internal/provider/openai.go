@@ -69,6 +69,20 @@ func NewZhipuOpenAIProvider(model string) *OpenAIProvider {
 	}
 }
 
+// NewMimoOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
+func NewMimoAIProvider(model string) *OpenAIProvider {
+	apiKey := os.Getenv("MIMO_API_KEY")
+	if apiKey == "" {
+		panic("请设置 MIMO_API_KEY 环境变量")
+	}
+	// 核心：将官方 SDK 的地址替换为智谱的兼容端点
+	baseURL := "https://api.xiaomimimo.com/v1"
+	return &OpenAIProvider{
+		client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+		model:  model,
+	}
+}
+
 func (p *OpenAIProvider) buildParams(msgs []schema.Message, availableTools []schema.ToolDefinition, outputLimit int) openai.ChatCompletionNewParams {
 	var openaiMsgs []openai.ChatCompletionMessageParamUnion
 
