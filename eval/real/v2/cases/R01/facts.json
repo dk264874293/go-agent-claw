@@ -1,0 +1,81 @@
+{
+  "edges": [
+    {
+      "from": "runCLI",
+      "to": "submit",
+      "citation": {
+        "path": "cmd/claw/main.go",
+        "line": 84
+      }
+    },
+    {
+      "from": "submit",
+      "to": "AgentEngine.Run",
+      "citation": {
+        "path": "cmd/claw/main.go",
+        "line": 90
+      }
+    },
+    {
+      "from": "AgentEngine.Run",
+      "to": "runTask",
+      "citation": {
+        "path": "internal/engine/loop.go",
+        "line": 248
+      }
+    },
+    {
+      "from": "runTask",
+      "to": "converse",
+      "citation": {
+        "path": "internal/engine/loop.go",
+        "line": 325
+      }
+    },
+    {
+      "from": "converse",
+      "to": "executeBatch",
+      "citation": {
+        "path": "internal/engine/loop.go",
+        "line": 440
+      }
+    },
+    {
+      "from": "executeBatch",
+      "to": "execute",
+      "citation": {
+        "path": "internal/engine/loop.go",
+        "line": 503
+      }
+    },
+    {
+      "from": "execute",
+      "to": "Registry.Execute",
+      "citation": {
+        "path": "internal/engine/execution.go",
+        "line": 83
+      }
+    },
+    {
+      "from": "Registry.Execute",
+      "to": "WriteFileTool.Execute",
+      "citation": {
+        "path": "internal/tools/registry.go",
+        "line": 201
+      }
+    }
+  ],
+  "registration": {
+    "path": "internal/engine/execution.go",
+    "line": 189
+  },
+  "hashes": {
+    "cmd/claw/main.go": "061ae1dd9e1cb7c6b864f01ce5ff390abaa5106f4628a493d541776cb22ceb32",
+    "internal/tools/bash.go": "a2cffc190605fff0319a41fe72bff2e060c34adfaee6fc94003973414b6fe4f2",
+    "internal/tools/registry.go": "32080d9fe07b67942f586a8ecf3935fe377e5574478f523766dda99d5a568041",
+    "internal/tools/scope.go": "7bcc47920e6bf35e524f465be9a24ffa6894e594fac9b4f2be435e600d9a35f4",
+    "internal/tools/write_file.go": "a75ea5d786bf36436d4250f7201d385d499a09c46e550caac9a29c8fed1962c0",
+    "internal/engine/execution.go": "07a5759be6288248cb82fe6931488f3deb50c00f9f8f919fbeaf739bf2c95939",
+    "internal/engine/loop.go": "bcb51a13a2c4d198528e10f3c59c2f9ecb96ea58b4fb5189bdf174676feefc60"
+  }
+}

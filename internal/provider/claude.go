@@ -24,7 +24,7 @@ func NewDeepseekClaudeProvider(model string) *ClaudeProvider {
     }
     baseURL := "https://api.deepseek.com/anthropic"
     return &ClaudeProvider{
-        client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL), option.WithMaxRetries(0)),
         model:  model,
     }
 }
@@ -36,7 +36,7 @@ func NewZhipuClaudeProvider(model string) *ClaudeProvider {
     }
     baseURL := "https://open.bigmodel.cn/api/paas/v4/"
     return &ClaudeProvider{
-        client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL), option.WithMaxRetries(0)),
         model:  model,
     }
 }
@@ -53,7 +53,7 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
         case schema.RoleUser:
             if msg.ToolCallID != "" {
                 anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(
-                    anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
+                    anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, msg.ToolStatus != "" && msg.ToolStatus != schema.ToolSucceeded),
                 ))
             } else {
                 anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(
@@ -140,7 +140,7 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
     }
 
      // 【新增】提取 Usage 信息
-    if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+    if resp.JSON.Usage.Valid() && resp.Usage.JSON.InputTokens.Valid() && resp.Usage.JSON.OutputTokens.Valid() {
         resultMsg.Usage = &schema.Usage{
             PromptTokens:     int(resp.Usage.InputTokens),
             CompletionTokens: int(resp.Usage.OutputTokens),

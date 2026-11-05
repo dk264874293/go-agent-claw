@@ -1,0 +1,4 @@
+{"sequence":1,"kind":"started","usage":{"model_calls":0,"tool_calls":0}}
+{"sequence":2,"kind":"turn","usage":{"model_calls":0,"tool_calls":0}}
+{"sequence":3,"kind":"model","usage":{"model_calls":1,"tool_calls":0}}
+{"sequence":4,"kind":"finished","usage":{"model_calls":1,"tool_calls":0},"result":{"run_id":"d5f18b2de0102655f1eec9797651b846","task_id":"2a63551c7fb84660a90916a9f00ccd76","status":"BUDGET_EXHAUSTED","stop_code":"deadline","reason":"context deadline exceeded"}}

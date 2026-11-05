@@ -1,0 +1,121 @@
+{
+  "schema_version": 2,
+  "suite_id": "real-task-v2",
+  "model": "gpt-6.1-sol",
+  "budget": {
+    "max_model_calls": 8,
+    "max_tool_calls": 20,
+    "max_turns": 30,
+    "timeout_s": 120,
+    "context_bytes": 300000
+  },
+  "cases": [
+    {
+      "id": "W02",
+      "task_kind": "change",
+      "mode": "workspace",
+      "prompt": "cases/W02/prompt.txt",
+      "fixture": "cases/W02/workspace",
+      "oracle": "cases/W02/verify.py",
+      "expected_status": "NEEDS_VERIFICATION",
+      "expected_exit_code": 2,
+      "write_policy": {
+        "modify": [
+          "internal/tools/read_file.go"
+        ],
+        "create_optional": [
+          "internal/tools/definition_test.go"
+        ],
+        "delete": []
+      },
+      "require_final_text": true,
+      "required_reads": [],
+      "repetitions": 3
+    },
+    {
+      "id": "W03",
+      "task_kind": "change",
+      "mode": "workspace",
+      "prompt": "cases/W03/prompt.txt",
+      "fixture": "cases/W03/workspace",
+      "oracle": "cases/W03/verify.py",
+      "expected_status": "NEEDS_VERIFICATION",
+      "expected_exit_code": 2,
+      "write_policy": {
+        "modify": [],
+        "create_optional": [
+          "internal/tools/version_conflict_test.go"
+        ],
+        "delete": []
+      },
+      "require_final_text": true,
+      "required_reads": [],
+      "repetitions": 3
+    },
+    {
+      "id": "R01",
+      "task_kind": "answer",
+      "mode": "readonly",
+      "prompt": "cases/R01/prompt.txt",
+      "fixture": "cases/R01/workspace",
+      "oracle": "cases/R01/verify.py",
+      "expected_status": "ANSWERED",
+      "expected_exit_code": 0,
+      "write_policy": {
+        "modify": [],
+        "create_optional": [],
+        "delete": []
+      },
+      "require_final_text": true,
+      "required_reads": [
+        "cmd/claw/main.go",
+        "internal/tools/scope.go",
+        "internal/tools/registry.go"
+      ],
+      "repetitions": 3
+    },
+    {
+      "id": "R02",
+      "task_kind": "answer",
+      "mode": "readonly",
+      "prompt": "cases/R02/prompt.txt",
+      "fixture": "cases/R02/workspace",
+      "oracle": "cases/R02/verify.py",
+      "expected_status": "ANSWERED",
+      "expected_exit_code": 0,
+      "write_policy": {
+        "modify": [],
+        "create_optional": [],
+        "delete": []
+      },
+      "require_final_text": true,
+      "required_reads": [
+        "evidence/launcher.jsonl",
+        "evidence/signal-events.jsonl",
+        "evidence/deadline-events.jsonl",
+        "evidence/verification-started.txt"
+      ],
+      "repetitions": 3
+    },
+    {
+      "id": "W01",
+      "task_kind": "change",
+      "mode": "workspace",
+      "prompt": "cases/W01/prompt.txt",
+      "fixture": "cases/W01/workspace",
+      "oracle": "cases/W01/verify.py",
+      "expected_status": "NEEDS_VERIFICATION",
+      "expected_exit_code": 2,
+      "write_policy": {
+        "modify": [
+          "agentops.config.json"
+        ],
+        "create_optional": [],
+        "delete": []
+      },
+      "require_final_text": true,
+      "required_reads": [],
+      "repetitions": 3
+    }
+  ]
+}

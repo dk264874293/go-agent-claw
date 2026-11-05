@@ -1,0 +1,2 @@
+分析这份冻结源码快照中，CLI 单次任务（未启用 plan）的提交到 write_file Handler 分发的完整调用路径，范围止于 WriteFileTool.Execute，不需要分析磁盘落盘实现。给出 CLI 默认权限、write_file 和 Bash 可用模式，以及 Registry 准入顺序。
+用文件工具读取引用的实际源码行。最终只输出 JSON 对象，字段 default_mode、write_modes、bash_modes、checks（按执行顺序填写 registered、scope、parameters、middleware、handler）、citations（权限事实引用，每项 path 和一基 line）、call_path（有序数组，每项 from、to、citation，其中 citation 含 path 和 line）、registration（注册 WriteFileTool 的 path 和 line）。调用名称使用 runCLI、submit、AgentEngine.Run、runTask、converse、executeBatch、execute、Registry.Execute、WriteFileTool.Execute。每条调用边引用调用表达式所在行，不能只引用函数定义。

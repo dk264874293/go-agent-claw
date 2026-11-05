@@ -1,0 +1,7 @@
+诊断工作区 evidence/ 中 RUN-08 的真实联调故障。先用文件工具读取记录和标记，区分手动中断、该任务的恢复和另一次时限耗尽。根据证据判断动作是否启动、是否得到验收成功证明，以及恢复是否重放。遇到结果仍未知时给出继续条件。历史命令只用于取证。
+
+最终只输出一个 JSON 对象，包含 cancel、resume、deadline、citations：
+- cancel 对象含 run_id、exit_code、stop_code、action_id、action_status、action_effect、started（布尔）、verified（布尔）。
+- resume 对象含 run_id、exit_code、status、model_calls_delta、tool_calls_delta、replayed（布尔）、decision（用中文简述为何停下和继续前要做什么）。
+- deadline 对象含 run_id、exit_code、status、stop_code、tool_calls。
+- citations 是数组，每项含 claim、path、line（一基行号），claim 使用 marker、action、resume、deadline。marker 引用标记内容，action 引用动作结果，resume 和 deadline 引用相应终态及用量。每类至少一条。

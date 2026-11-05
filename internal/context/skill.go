@@ -10,98 +10,87 @@
 package context
 
 import (
-    "fmt"
-    "io/fs"
-    "os"
-    "path/filepath"
-    "strings"
+	"bytes"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"strings"
+	"syscall"
 )
 
-// Skill 定义了从 SKILL.md 中解析出的标准化技能结构
-type Skill struct {
-    Name        string
-    Description string
-    Body        string // Markdown 正文指令
+const skillBase = ".claw/skills"
+
+// readRegularPrefix 只读取工作区内普通文件的前缀。
+func readRegularPrefix(root *os.Root, name string, maxBytes int64) ([]byte, bool) {
+	// 非阻塞打开可避免普通文件在打开前被替换为管道时挂起。
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	return content, err == nil
 }
 
-// SkillLoader 负责从本地文件系统中加载并解析符合规范的技能模板
-type SkillLoader struct {
-    workDir string
+func loadSkillIndex(root *os.Root) string {
+	var index strings.Builder
+	count := 0
+	_ = fs.WalkDir(root.FS(), skillBase, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry == nil || !entry.Type().IsRegular() || entry.Name() != "SKILL.md" {
+			return nil
+		}
+		header, ok := readRegularPrefix(root, name, 8<<10)
+		if !ok {
+			return nil
+		}
+		title, description := skillMetadata(header)
+		if title == "" {
+			title = path.Base(path.Dir(name))
+		}
+		line := fmt.Sprintf("- %q %q。说明文件 %q。\n", title, description, name)
+		if index.Len()+len(line) > 16<<10 {
+			index.WriteString("其余技能可在工作区的 .claw/skills 目录中查找。\n")
+			return fs.SkipAll
+		}
+		index.WriteString(line)
+		count++
+		if count == 100 {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if count == 0 {
+		return ""
+	}
+	return "\n# 可用技能\n匹配到技能时，用读取工具打开对应说明文件。\n" + index.String()
 }
 
-func NewSkillLoader(workDir string) *SkillLoader {
-    return &SkillLoader{workDir: workDir}
-}
-
-// LoadAll 扫描 .claw/skills 目录，解析所有 SKILL.md，并格式化为字符串准备注入 Context
-func (s *SkillLoader) LoadAll() string {
-    skillBaseDir := filepath.Join(s.workDir, ".claw", "skills")
-
-    // 如果目录不存在，说明当前工作区没有配置技能，静默返回
-    if _, err := os.Stat(skillBaseDir); os.IsNotExist(err) {
-        return "" 
-    }
-
-    var skillsBuilder strings.Builder
-    skillsBuilder.WriteString("\n### 可用专业技能 (Agent Skills)\n")
-    skillsBuilder.WriteString("以下是你拥有的标准化外挂技能，请在符合 description 描述的场景下严格遵循其正文指令：\n\n")
-
-    // 遍历查找 SKILL.md
-    err := filepath.WalkDir(skillBaseDir, func(path string, d fs.DirEntry, err error) error {
-        if err != nil {
-            return err
-        }
-        // 仅处理名为 SKILL.md 的文件
-        if !d.IsDir() && d.Name() == "SKILL.md" {
-            content, err := os.ReadFile(path)
-            if err == nil {
-                skill := parseSkillMD(string(content))
-
-                // 将解析后的技能按结构注入
-                skillsBuilder.WriteString(fmt.Sprintf("#### 技能名称: %s\n", skill.Name))
-                skillsBuilder.WriteString(fmt.Sprintf("**触发条件**: %s\n\n", skill.Description))
-                skillsBuilder.WriteString("**执行指南**:\n")
-                skillsBuilder.WriteString(skill.Body)
-                skillsBuilder.WriteString("\n\n---\n")
-            }
-        }
-        return nil
-    })
-
-    if err != nil || skillsBuilder.Len() < 100 {
-        return ""
-    }
-
-    return skillsBuilder.String()
-}
-
-// parseSkillMD 极简解析带有 YAML Frontmatter 的 Markdown 内容
-func parseSkillMD(content string) Skill {
-    skill := Skill{
-        Name:        "Unknown Skill",
-        Description: "No description provided.",
-        Body:        content, // 默认将全量内容作为 body
-    }
-
-    // 简单解析 YAML Frontmatter (以 --- 包裹)
-    if strings.HasPrefix(content, "---\n") || strings.HasPrefix(content, "---\r\n") {
-        parts := strings.SplitN(content, "---", 3)
-        if len(parts) == 3 {
-            frontmatter := parts[1]
-            skill.Body = strings.TrimSpace(parts[2])
-
-            // 逐行提取 metadata
-            lines := strings.Split(frontmatter, "\n")
-            for _, line := range lines {
-                line = strings.TrimSpace(line)
-                if strings.HasPrefix(line, "name:") {
-                    skill.Name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
-                } else if strings.HasPrefix(line, "description:") {
-                    skill.Description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
-                }
-            }
-        }
-    }
-
-    return skill
+func skillMetadata(header []byte) (name, description string) {
+	lines := bytes.Split(header, []byte{'\n'})
+	if len(lines) < 2 || !bytes.Equal(bytes.TrimSpace(lines[0]), []byte("---")) {
+		return "", ""
+	}
+	for _, line := range lines[1:] {
+		line = bytes.TrimSpace(line)
+		if bytes.Equal(line, []byte("---")) {
+			return name, description
+		}
+		key, value, ok := bytes.Cut(line, []byte{':'})
+		if !ok {
+			continue
+		}
+		switch string(key) {
+		case "name":
+			name = strings.TrimSpace(string(value))
+		case "description":
+			description = strings.TrimSpace(string(value))
+		}
+	}
+	return "", ""
 }

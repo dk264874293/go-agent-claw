@@ -10,72 +10,54 @@
 package tools
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "os"
-    "path/filepath"
+	"context"
+	"encoding/json"
 
-    "github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
-type WriteFileTool struct {
-    workDir string // 工作区约束
-}
+type WriteFileTool struct{ workDir string }
 
-func NewWriteFileTool(workDir string) *WriteFileTool {
-    return &WriteFileTool{workDir: workDir}
-}
+func NewWriteFileTool(workDir string) *WriteFileTool { return &WriteFileTool{workDir: workDir} }
 
-func (t *WriteFileTool) Name() string {
-    return "write_file"
-}
+func (t *WriteFileTool) Name() string { return "write_file" }
 
 func (t *WriteFileTool) Definition() schema.ToolDefinition {
-    return schema.ToolDefinition{
-        Name:        t.Name(),
-        Description: "创建或覆盖写入一个文件。如果目录不存在会自动创建。请提供相对于工作区的相对路径。",
-        InputSchema: map[string]interface{}{
-            "type": "object",
-            "properties": map[string]interface{}{
-                "path": map[string]interface{}{
-                    "type":        "string",
-                    "description": "要写入的文件路径，如 src/main.go",
-                },
-                "content": map[string]interface{}{
-                    "type":        "string",
-                    "description": "要写入的完整文件内容",
-                },
-            },
-            "required": []string{"path", "content"},
-        },
-    }
+	return definition(t.Name(), "创建或覆盖工作区文件。覆盖时必须提供 read_file 返回的版本。", map[string]any{
+		"path":             stringParam("工作区相对路径"),
+		"content":          stringParam("完整文件内容"),
+		"expected_version": stringParam("覆盖时填 read_file 返回的 SHA-256，创建时填 missing 或省略"),
+	}, "path", "content")
 }
 
 type writeFileArgs struct {
-    Path    string `json:"path"`
-    Content string `json:"content"`
+	Path            string `json:"path"`
+	Content         string `json:"content"`
+	ExpectedVersion string `json:"expected_version"`
+}
+
+func parseWrite(ctx context.Context, args json.RawMessage) (input writeFileArgs, err error) {
+	if err := decodeArgs(args, &input, "path", "content"); err != nil {
+		return input, err
+	}
+	input.Path, err = writablePath(ctx, input.Path)
+	if err != nil {
+		return input, err
+	}
+	if err := expectedVersion(input.ExpectedVersion, true); err != nil {
+		return input, err
+	}
+	if input.ExpectedVersion == "" {
+		input.ExpectedVersion = MissingVersion
+	}
+	return input, nil
+}
+
+func (t *WriteFileTool) validate(ctx context.Context, args json.RawMessage) error {
+	_, err := parseWrite(ctx, args)
+	return err
 }
 
 func (t *WriteFileTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-    var input writeFileArgs
-    if err := json.Unmarshal(args, &input); err != nil {
-        return "", fmt.Errorf("参数解析失败: %w", err)
-    }
-
-    // 【安全防线】：限制在 WorkDir 下执行，防止大模型修改系统级文件
-    fullPath := filepath.Join(t.workDir, input.Path)
-
-    // 自动创建缺失的父级目录
-    if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-        return "", fmt.Errorf("创建父目录失败: %w", err)
-    }
-
-    // 写入文件内容，权限设为 0644
-    err := os.WriteFile(fullPath, []byte(input.Content), 0644)
-    if err != nil {
-        return "", fmt.Errorf("写入文件失败: %w", err)
-    }
-
-    return fmt.Sprintf("成功将内容写入到文件: %s", input.Path), nil
+	return mutateFile(ctx, t.workDir, t.Name(), args)
 }

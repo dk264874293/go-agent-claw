@@ -1,164 +1,302 @@
-// internal/feishu/bot.go
 package feishu
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "os"
-    "strings"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"slices"
+	"strings"
+	"sync"
+	"time"
 
-    "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
-    larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
-    "github.com/dk264874293/go-agent-claw/internal/engine"
-    ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
-    "github.com/dk264874293/go-agent-claw/internal/schema"
-    lark "github.com/larksuite/oapi-sdk-go/v3"
+	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/tools"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-// ==========================================
-// 1. Context 传递机制：解决并发 Reporter 的提取
-// ==========================================
-// reporterKey 定义 Context 中存放 Reporter 的专属键
-type reporterKey struct{}
-// ContextWithReporter 将专属的 Reporter 封入上下文
-func ContextWithReporter(ctx context.Context, r engine.Reporter) context.Context {
-    return context.WithValue(ctx, reporterKey{}, r)
-}
-// ReporterFromContext 供底层的 Middleware 提取专属的 Reporter 发送审批卡片
-func ReporterFromContext(ctx context.Context) engine.Reporter {
-    if r, ok := ctx.Value(reporterKey{}).(engine.Reporter); ok {
-        return r
-    }
-    return nil
+const maxQueuedTasks = 32
+
+type RunTaskFunc func(context.Context, *ctxpkg.Session, engine.TaskSpec, engine.Reporter, tools.MiddlewareFunc) (engine.RunResult, error)
+
+type incomingMessage struct {
+	eventKey string
+	chatID   string
+	senderID string
+	text     string
 }
 
-// ==========================================
-// 2. 飞书 Bot 核心调度器
-// ==========================================
-// AgentEngineFactory 允许每次收到消息时，根据 Session 动态创建引擎
-type AgentEngineFactory func(session *ctxpkg.Session) *engine.AgentEngine
+type chatQueue struct {
+	jobs    []incomingMessage
+	session *ctxpkg.Session
+	running bool
+	actorID string
+	cancel  context.CancelFunc
+}
+
+// FeishuBot 将同一群的任务串行派发，并为共用工作区的群聊保留互斥入口。
 type FeishuBot struct {
-    client  *lark.Client
-    appID   string
-    appSecret string
-    workDir   string           // 保存从入口传来的工作区路径
-    factory AgentEngineFactory // 替换掉原来的单一 engine 引用
-}
-func NewFeishuBotWithFactory(factory AgentEngineFactory, workDir string) *FeishuBot {
-    appID := os.Getenv("FEISHU_APP_ID")
-    appSecret := os.Getenv("FEISHU_APP_SECRET")
-    if appID == "" || appSecret == "" {
-        log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
-    }
-    client := lark.NewClient(appID, appSecret)
-    return &FeishuBot{
-        client:    client,
-        appID:     appID,
-        appSecret: appSecret,
-        workDir:   workDir, // 接收外部传入的路径
-        factory:   factory,
-    }
+	config   Config
+	ctx      context.Context
+	cancel   context.CancelFunc
+	ledger   *eventLedger
+	run      RunTaskFunc
+	send     sendMessage
+	approval approvalManager
+
+	mu      sync.Mutex
+	workers sync.WaitGroup
+	chats   map[string]*chatQueue
+	gates   map[string]chan struct{}
+	closed  bool
 }
 
-func (b *FeishuBot) GetEventDispatcher() *dispatcher.EventDispatcher {
-    encryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
-    verifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
-    handler := dispatcher.NewEventDispatcher(verifyToken, encryptKey).
-        OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
-            contentStr := *event.Event.Message.Content
-            contentStr = strings.TrimPrefix(contentStr, `{"text":"`)
-            contentStr = strings.TrimSuffix(contentStr, `"}`)
-            chatId := *event.Event.Message.ChatId
-            log.Printf("[Feishu] 收到会话 %s 消息: %s\n", chatId, contentStr)
-            // 拦截人工审批的特殊口令，并唤醒挂起的 Registry 协程
-            if strings.HasPrefix(contentStr, "approve ") {
-                taskID := strings.TrimPrefix(contentStr, "approve ")
-                taskID = strings.TrimSpace(taskID)
-                GlobalApprovalMgr.ResolveApproval(taskID, true, "人类管理员已批准操作")
-                log.Printf("[Feishu] 会话 %s: ✅ 已为您批准任务 %s", chatId, taskID)
-                return nil
-            }
-            if strings.HasPrefix(contentStr, "reject ") {
-                taskID := strings.TrimPrefix(contentStr, "reject ")
-                taskID = strings.TrimSpace(taskID)
-                GlobalApprovalMgr.ResolveApproval(taskID, false, "人类管理员认为该操作存在极高风险，已无情拒绝")
-                log.Printf("[Feishu] 会话 %s: 🚫 已拒绝任务 %s", chatId, taskID)
-                return nil
-            }
-            // 如果是普通对话，新开一个 Goroutine 去启动 Agent，防止阻塞 Webhook
-            go b.handleAgentRun(chatId, contentStr)
-            return nil
-        }).
-        OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
-            // 消息已读事件，静默忽略
-            return nil
-        })
-    return handler
+func NewFeishuBot(parent context.Context, config Config, client *lark.Client, run RunTaskFunc) (*FeishuBot, error) {
+	if client == nil {
+		return nil, errors.New("缺少飞书客户端")
+	}
+	return newFeishuBot(parent, config, run, func(ctx context.Context, chatID, text string) error {
+		content, err := json.Marshal(map[string]string{"text": text})
+		if err != nil {
+			return err
+		}
+		req := larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").
+			Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).
+				MsgType(larkim.MsgTypeText).Content(string(content)).Build()).Build()
+		resp, err := client.Im.Message.Create(ctx, req)
+		if err != nil {
+			return err
+		}
+		if resp == nil || !resp.Success() {
+			return errors.New("飞书拒绝消息请求")
+		}
+		return nil
+	})
 }
 
-func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
-    // 为当前并发请求实例化一个专属的 Reporter
-    reporter := &FeishuReporter{
-        client: b.client,
-        chatId: chatId,
-    }
-    // 1. 获取物理隔离的 Session
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(chatId, b.workDir)
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
-    // 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
-    eng := b.factory(sess)
-    // 3. 【驾驭核心】：将专属的 reporter 塞入 Context 并传给引擎！
-    runCtx := ContextWithReporter(context.Background(), reporter)
-    if err := eng.Run(runCtx, sess, reporter); err != nil {
-        reporter.sendMsg(fmt.Sprintf("❌ Agent 运行崩溃: %v", err))
-    }
+func newFeishuBot(parent context.Context, config Config, run RunTaskFunc, send sendMessage) (*FeishuBot, error) {
+	if run == nil || send == nil {
+		return nil, errors.New("缺少飞书任务执行器或消息发送器")
+	}
+	chats := make(map[string]ChatBinding, len(config.Chats))
+	for id, binding := range config.Chats {
+		binding.AllowedUsers = slices.Clone(binding.AllowedUsers)
+		binding.Approvers = slices.Clone(binding.Approvers)
+		chats[id] = binding
+	}
+	config.Chats = chats
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	ledger, err := openEventLedger(config.EventLedger)
+	if err != nil {
+		return nil, fmt.Errorf("打开飞书事件台账失败: %w", err)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	bot := &FeishuBot{
+		config: config, ctx: ctx, cancel: cancel, ledger: ledger, run: run, send: send,
+		chats: make(map[string]*chatQueue), gates: make(map[string]chan struct{}),
+	}
+	for id, binding := range config.Chats {
+		bot.chats[id] = &chatQueue{session: ctxpkg.NewSession(id, binding.WorkDir)}
+		if bot.gates[binding.WorkDir] == nil {
+			bot.gates[binding.WorkDir] = make(chan struct{}, 1)
+		}
+	}
+	return bot, nil
 }
 
+func (b *FeishuBot) Close() error {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	b.cancel()
+	b.mu.Unlock()
+	b.workers.Wait()
+	return b.ledger.root.Close()
+}
 
+func (b *FeishuBot) GetEventDispatcher(appID, verificationToken, encryptKey string) *dispatcher.EventDispatcher {
+	return dispatcher.NewEventDispatcher(verificationToken, encryptKey).
+		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+			if event == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil || event.Event == nil {
+				return errors.New("飞书事件缺少头部或消息")
+			}
+			header := event.EventV2Base.Header
+			if appID == "" || verificationToken == "" || encryptKey == "" ||
+				header.AppID != appID ||
+				subtle.ConstantTimeCompare([]byte(header.Token), []byte(verificationToken)) != 1 {
+				return errors.New("飞书事件身份无效")
+			}
+			msg, sender := event.Event.Message, event.Event.Sender
+			if msg == nil || sender == nil || sender.SenderId == nil || value(sender.SenderType) != "user" ||
+				value(msg.ChatType) != "group" || value(msg.MessageType) != "text" {
+				return nil
+			}
+			var content struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(value(msg.Content)), &content); err != nil {
+				return errors.New("飞书文本消息格式无效")
+			}
+			if header.EventID == "" {
+				return errors.New("飞书事件缺少去重标识")
+			}
+			return b.handle(ctx, incomingMessage{
+				eventKey: strings.Join([]string{header.AppID, header.TenantKey, header.EventID}, "\x00"),
+				chatID:   value(msg.ChatId), senderID: value(sender.SenderId.OpenId), text: strings.TrimSpace(content.Text),
+			})
+		})
+}
 
+func value(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
 
-// ==========================================
-// FeishuReporter: 将引擎的输出格式化后发给飞书
-// ==========================================
+func (b *FeishuBot) handle(requestCtx context.Context, msg incomingMessage) error {
+	binding, exists := b.config.Chats[msg.chatID]
+	if !exists || msg.senderID == "" || strings.TrimSpace(msg.text) == "" || msg.eventKey == "" {
+		return nil
+	}
+	fields := strings.Fields(msg.text)
+	approval := fields[0] == "approve" || fields[0] == "reject"
+	cancel := msg.text == "/cancel"
+	switch {
+	case approval:
+		if !slices.Contains(binding.Approvers, msg.senderID) || len(fields) != 2 {
+			return nil
+		}
+	case cancel:
+		if !slices.Contains(binding.Approvers, msg.senderID) && !slices.Contains(binding.AllowedUsers, msg.senderID) {
+			return nil
+		}
+	default:
+		if !slices.Contains(binding.AllowedUsers, msg.senderID) {
+			return nil
+		}
+	}
+
+	b.mu.Lock()
+	if b.closed || b.ctx.Err() != nil {
+		b.mu.Unlock()
+		return errors.New("飞书服务正在关闭")
+	}
+	queue := b.chats[msg.chatID]
+	if !approval && !cancel && len(queue.jobs) >= maxQueuedTasks {
+		b.mu.Unlock()
+		return errors.New("该群任务队列已满")
+	}
+	claimed, err := b.ledger.claim(msg.eventKey)
+	if err != nil || !claimed {
+		b.mu.Unlock()
+		return err
+	}
+	if approval {
+		b.mu.Unlock()
+		if b.approval.resolve(msg.chatID, msg.senderID, fields[1], fields[0] == "approve") {
+			b.reply(requestCtx, msg.chatID, "审批决定已记录")
+		} else {
+			b.reply(requestCtx, msg.chatID, "审批已过期、已处理或不属于此群")
+		}
+		return nil
+	}
+	if cancel {
+		stopped := queue.cancel != nil && (queue.actorID == msg.senderID || slices.Contains(binding.Approvers, msg.senderID))
+		if stopped {
+			queue.cancel()
+		}
+		b.mu.Unlock()
+		if stopped {
+			b.reply(requestCtx, msg.chatID, "已请求取消当前任务")
+		}
+		return nil
+	}
+	queue.jobs = append(queue.jobs, msg)
+	if !queue.running {
+		queue.running = true
+		b.workers.Go(func() { b.runQueue(queue, binding) })
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *FeishuBot) runQueue(queue *chatQueue, binding ChatBinding) {
+	for {
+		b.mu.Lock()
+		if len(queue.jobs) == 0 || b.closed || b.ctx.Err() != nil {
+			queue.running = false
+			queue.jobs = nil
+			b.mu.Unlock()
+			return
+		}
+		msg := queue.jobs[0]
+		queue.jobs[0] = incomingMessage{}
+		queue.jobs = queue.jobs[1:]
+		taskCtx, cancel := context.WithCancel(b.ctx)
+		queue.cancel, queue.actorID = cancel, msg.senderID
+		b.mu.Unlock()
+
+		b.execute(taskCtx, queue.session, binding, msg)
+		cancel()
+		b.mu.Lock()
+		queue.cancel, queue.actorID = nil, ""
+		b.mu.Unlock()
+	}
+}
+
+func (b *FeishuBot) execute(ctx context.Context, session *ctxpkg.Session, binding ChatBinding, msg incomingMessage) {
+	gate := b.gates[binding.WorkDir]
+	select {
+	case <-ctx.Done():
+		b.reply(b.ctx, msg.chatID, "任务已取消")
+		return
+	case gate <- struct{}{}:
+	}
+	defer func() { <-gate }()
+	if ctx.Err() != nil {
+		b.reply(b.ctx, msg.chatID, "任务已取消")
+		return
+	}
+
+	spec := engine.TaskSpec{Goal: msg.text, Mode: binding.Mode, VerifyCommand: binding.VerifyCommand, Kind: engine.TaskChange}
+	if binding.Mode == tools.ModeReadOnly {
+		spec.Kind = engine.TaskAnswer
+	}
+	reporter := &FeishuReporter{bot: b, chatID: msg.chatID}
+	result, err := b.run(ctx, session, spec, reporter, b.approval.guard(msg.chatID, msg.senderID, binding, b.send))
+	if err != nil {
+		log.Printf("[飞书] 任务执行失败，任务 ID %s: %v", result.TaskID, err)
+	}
+	b.reply(b.ctx, msg.chatID, engine.FormatRunResult(result))
+}
+
+func (b *FeishuBot) reply(parent context.Context, chatID, message string) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	if err := b.send(ctx, chatID, message); err != nil && ctx.Err() == nil {
+		log.Printf("[飞书] 发送状态失败: %v", err)
+	}
+}
+
+// FeishuReporter 保留兼容接口，最终回复由 execute 在引擎退出后统一发布。
+// 工具进度保持静默，动作审批通过独立消息呈现参数。
 type FeishuReporter struct {
-    client *lark.Client
-    chatId string
-}
-func (r *FeishuReporter) sendMsg(text string) {
-    textContent := map[string]string{
-        "text": text,
-    }
-    contentBytes, _ := json.Marshal(textContent)
-    contentStr := string(contentBytes)
-    msgReq := larkim.NewCreateMessageReqBuilder().
-        ReceiveIdType("chat_id").
-        Body(larkim.NewCreateMessageReqBodyBuilder().
-            ReceiveId(r.chatId).
-            MsgType(larkim.MsgTypeText).
-            Content(contentStr).
-            Build()).
-        Build()
-    _, _ = r.client.Im.Message.Create(context.Background(), msgReq)
+	bot    *FeishuBot
+	chatID string
 }
 
-func (r *FeishuReporter) OnThinking(ctx context.Context) {
-    r.sendMsg("🤔 模型正在慢思考 (Thinking)...")
-}
-
-func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
-    r.sendMsg(fmt.Sprintf("🛠️ **正在执行工具**：`%s`\n参数：`%s`", toolName, args))
-}
-func (r *FeishuReporter) OnToolResult(ctx context.Context, toolName string, result string, isError bool) {
-    if isError {
-        r.sendMsg(fmt.Sprintf("⚠️ **执行报错** (%s)：\n%s", toolName, result))
-    } else {
-        r.sendMsg(fmt.Sprintf("✅ **执行成功** (%s)", toolName))
-    }
-}
-func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
-    r.sendMsg(content)
-}
-// 确保 FeishuReporter 实现了 Reporter 接口
-var _ engine.Reporter = (*FeishuReporter)(nil)
+func (*FeishuReporter) OnThinking(context.Context)                         {}
+func (*FeishuReporter) OnToolCall(context.Context, string, string)         {}
+func (*FeishuReporter) OnToolResult(context.Context, string, string, bool) {}
+func (*FeishuReporter) OnMessage(context.Context, string)                  {}

@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
     "os"
+    "strings"
 
     "github.com/openai/openai-go/v3"
     "github.com/openai/openai-go/v3/option"
@@ -13,23 +14,27 @@ import (
     "github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
+const DefaultOpenAIModel = "gpt-6.1-terra"
+
 type OpenAIProvider struct {
     client openai.Client // 值类型，非指针
     model  string
 }
 
-// NewOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向数云 AI 网关
+// NewOpenAIProvider 构造函数：基于 OpenAI V3 SDK，默认使用 OpenAI 官方 API
 func NewOpenAIProvider(model string) *OpenAIProvider {
     apiKey := os.Getenv("OPENAI_API_KEY")
     if apiKey == "" {
         panic("请设置 OPENAI_API_KEY 环境变量")
     }
-    // 注意：必须带 /v1 前缀。网关根路径是 Web 控制台，未知路由会返回 HTML 首页（HTTP 200），
-    // 导致 SDK 按 JSON 反序列化时抛出 content-type 'text/html' 错误
-    baseURL := "https://syaiapihub.shuyun.cn/v1/"
+    // 自定义兼容端点时，URL 应包含其 API 版本路径。
+    baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+    if baseURL == "" {
+        baseURL = "https://api.openai.com/v1/"
+    }
 
     return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL), option.WithMaxRetries(0)),
         model:  model,
     }
 }
@@ -44,7 +49,7 @@ func NewDeepseekOpenAIProvider(model string) *OpenAIProvider {
     baseURL := "https://api.deepseek.com"
 
     return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL), option.WithMaxRetries(0)),
         model:  model,
     }
 }
@@ -58,13 +63,16 @@ func NewZhipuOpenAIProvider(model string) *OpenAIProvider {
     // 核心：将官方 SDK 的地址替换为智谱的兼容端点
     baseURL := "https://open.bigmodel.cn/api/paas/v4/"
     return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
+        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL), option.WithMaxRetries(0)),
         model:  model,
     }
 }
 
-
 func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
+    if p.model == DefaultOpenAIModel || p.model == "gpt-6.1-sol" {
+        return p.generateResponses(ctx, msgs, availableTools)
+    }
+
     var openaiMsgs []openai.ChatCompletionMessageParamUnion
 
     // 1. 翻译上下文消息
@@ -165,7 +173,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
     }
 
     // 【新增】提取 Usage 信息
-    if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
+    if resp.JSON.Usage.Valid() && resp.Usage.JSON.PromptTokens.Valid() && resp.Usage.JSON.CompletionTokens.Valid() {
         resultMsg.Usage = &schema.Usage{
             PromptTokens:     int(resp.Usage.PromptTokens),
             CompletionTokens: int(resp.Usage.CompletionTokens),

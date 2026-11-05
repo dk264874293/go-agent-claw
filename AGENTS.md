@@ -23,10 +23,10 @@ go build ./cmd/... ./internal/...  # 构建模块内所有包
 go run ./cmd/bench                 # 基准测试 runner（会真实调用 LLM API，产生费用）
 ```
 
-- **不要使用 `go build ./...`**：会因 `workspace/main.go` 是空草稿文件而失败（当前 `cmd/agentops/main.go` 同样是空文件，也会炸）。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
-- 测试：`internal/context/session_test.go` 覆盖 `GetWorkingMemory` 的窗口裁剪逻辑（运行 `go test ./internal/context/`）；其余包暂无 `_test.go` 文件。
-- 需要 `ZHIPU_API_KEY`（在 `.env` 或环境变量中，缺失会直接 fatal）。飞书机器人代码额外需要 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
-- REPL 内置斜杠命令：`/help` `/exit` `/cost` `/status` `/clear`——本地拦截处理，不进 Session、不调用 LLM、不计费；`/clear` 走 `Session.ResetHistory()`（清历史、保账单）。输入独占一行的 `"""` 进入多行输入模式，再一行 `"""` 结束提交。
+- **不要使用 `go build ./...`**：会因 `workspace/main.go` 是空草稿文件而失败。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
+- 测试：`go test ./cmd/... ./internal/...`。共享预算、账本、存储和审批改动用 `go test -race ./internal/...` 验证。
+- CLI、Bench 和独立飞书服务默认读取 `OPENAI_API_KEY`。Bench 显式指定 `-model glm-*` 时读取 `ZHIPU_API_KEY`，飞书服务配置见 README。
+- REPL 内置斜杠命令：`/help` `/exit` `/cost` `/status` `/clear` `/verify` `/resume`。设置验收和清空对话在本地处理，`/resume` 恢复持久任务。输入独占一行的 `"""` 进入多行输入模式，再一行 `"""` 结束提交。
 
 ## 架构
 
@@ -37,32 +37,33 @@ internal/schema/            — 共享类型：Message、Role、ToolCall、ToolR
 internal/provider/          — LLMProvider 接口 + OpenAI 兼容 (openai.go) 与
                               Anthropic 兼容 (claude.go) 两套实现
 internal/engine/loop.go     — AgentEngine：ReAct 主循环 + 子智能体的 RunSub
-internal/engine/            — Reporter 接口 + TerminalReporter、ReminderInjector（防死循环）
+internal/engine/            — 调度、预算、验收、恢复、子智能体、Reporter
 internal/context/           — Session（历史 + 工作记忆）、Compactor、RecoveryManager、
                               PromptComposer（系统提示词、计划模式）、技能加载器
 internal/tools/             — BaseTool 接口、支持中间件的 Registry、
                               read/write/edit_file/bash 工具、子智能体工具
 internal/observability/     — CostTracker（包裹 provider，为 Session 计费）、Span 链路追踪，
                               导出到 <workDir>/.claw/traces
-internal/feishu/            — 飞书/Lark 机器人 + 审批流（目前未接入 main.go）
+internal/taskstore/         — 任务日志、检查点、证据、工作区锁
+internal/feishu/            — 群聊队列、去重、审批（cmd/agentops）
 ```
 
 ### 分层规则
 
 - 依赖向内流动：`schema` 不依赖任何包；`engine` 编排 `provider`、`tools`、`context`、`observability`。
-- 引擎对文件无状态：**WorkDir 挂在 Session 上**，注入各工具构造函数以约束文件操作范围。
+- **WorkDir 挂在 Session 上**。工具按 ExecutionScope 准入，文件操作使用工作区根句柄。
 - 工具结果以携带 `ToolCallID` 的 `RoleUser` 消息回传给模型（没有独立的 tool 角色）。
 - 工具参数是 `json.RawMessage`；各工具惰性反序列化自己的参数。
 
 ## 关键机制与坑
 
-- **工作记忆**：主循环只发送最近 20 条消息（`session.GetWorkingMemory(20)`），再由 `Compactor.Compact` 掩码/截断超长内容。改动截断逻辑时必须保住 ToolCall↔ToolResult 配对——配对断裂会导致 LLM API 返回 400 Bad Request；智谱 GLM 还要求首条非 system 消息必须是普通 user 消息（否则报 400 code=1214）。`GetWorkingMemory` 用两档策略处理窗口滑动：回退补数 ≤3 条时向前补齐到普通 user 消息块边界；超过 3 条则保持窗口大小，剔除头部孤儿 tool 结果并注入合成 user 前缀。
-- **并发工具执行**：同一轮的所有工具调用在 goroutine 中并发执行，各自写入预分配切片的不同槽位（切片本身不加锁）；`Session` 由 `sync.RWMutex` 保护。循环变量必须作为函数参数传入 goroutine，避免闭包捕获陷阱。
+- **工作记忆**：主循环只发送最近 20 条消息（`session.GetWorkingMemory(20)`），再由 `Compactor.CompactWithin` 按字节预算分诊。任务目标单独注入。改动截断逻辑时必须保住 ToolCall↔ToolResult 配对——配对断裂会导致 LLM API 返回 400 Bad Request；智谱 GLM 还要求首条非 system 消息必须是普通 user 消息（否则报 400 code=1214）。`GetWorkingMemory` 用两档策略处理窗口滑动：回退补数 ≤3 条时向前补齐到普通 user 消息块边界；超过 3 条则保持窗口大小，剔除头部孤儿 tool 结果并注入合成 user 前缀。
+- **并发工具执行**：连续的独立只读调用限量并发，写入和 Bash 作为顺序屏障。同一工作区由 taskstore 独占锁保护。
 - **包名怪癖**：`internal/eval/benchmark.go` 位于 `internal/eval/` 目录却声明 `package observability`。导入路径是 `internal/eval`，但引用时写作 `observability.*`（见 `cmd/bench/main.go`）。
 - **错误自愈**：工具报错会经过 `RecoveryManager.AnalyzeAndInject`，在模型看到输出前追加救援提示。
-- **双 Provider**：main 目前使用 `provider.NewZhipuOpenAIProvider("glm-4.7-flashx")`；`NewDeepseekClaudeProvider` 走 Anthropic 兼容路线。换模型需要改构造函数 + 模型字符串。
-- **main.go 中仍休眠的接线**：飞书 HTTP 服务保持注释状态，要有意识地启用，不要顺手打开。（子智能体工具 `spawn_subagent` 已启用，注册在 `eng.Run` 之前，配 `readOnlyRegistry` 使用。）
-- 引擎构造签名：`NewAgentEngine(provider, registry, enableThinking, planMode)`——thinking 阶段每轮发两次 LLM 调用（先不带工具做规划，再带工具行动）。
+- **模型入口**：CLI、Bench 和 AgentOps 默认用 `provider.NewOpenAIProvider(provider.DefaultOpenAIModel)`，默认模型为 `gpt-6.1-sol`。Bench 显式指定 `glm-*` 时使用智谱兼容 Provider。
+- **执行模式**：CLI 默认只读。工作区写入和可信本机命令须显式启用。子智能体只使用只读工具。
+- 引擎构造签名为 `NewAgentEngine(provider, registry, EngineOptions)`。通过 `Run(ctx, session, TaskSpec, reporter)` 执行，调用方从 `RunResult` 获取任务终态。
 
 ## 新增东西
 

@@ -1,0 +1,11 @@
+{"sequence":1,"kind":"started","usage":{"model_calls":0,"tool_calls":0}}
+{"sequence":2,"kind":"turn","usage":{"model_calls":0,"tool_calls":0}}
+{"sequence":3,"kind":"model","usage":{"model_calls":1,"tool_calls":0}}
+{"sequence":4,"kind":"elapsed"}
+{"sequence":5,"kind":"elapsed"}
+{"sequence":6,"kind":"tool","usage":{"model_calls":1,"tool_calls":1}}
+{"sequence":7,"kind":"action_started","usage":{"model_calls":1,"tool_calls":1},"pending":[{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","tool":"bash"}],"verify_command":"printf started > evidence/verification-started.txt && sleep 10"}
+{"sequence":8,"kind":"action_result","usage":{"model_calls":1,"tool_calls":1},"pending":[{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","tool":"bash"}],"action":{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool":"bash","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","status":"CANCELLED","effect":"UNKNOWN","error_kind":"取消"}}
+{"sequence":9,"kind":"finished","usage":{"model_calls":1,"tool_calls":1},"pending":[{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","tool":"bash"}],"result":{"run_id":"a233545761d36518c3e8fe4a27a43499","task_id":"d8a3f491d72cd871520f37c6df282b78","status":"CANCELLED","stop_code":"cancelled","reason":"context canceled"},"verification_recorded":false}
+{"sequence":10,"kind":"started","usage":{"model_calls":1,"tool_calls":1},"pending":[{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","tool":"bash"}]}
+{"sequence":11,"kind":"finished","usage":{"model_calls":1,"tool_calls":1},"pending":[{"action_id":"5b519e01f7cdd250e90d957c46a923ea","tool_call_id":"verify-c58d7fd58cf422f17de3f1cff480f991","tool":"bash"}],"result":{"run_id":"11fdbd66b7da8ff6e9999b709271360d","task_id":"d8a3f491d72cd871520f37c6df282b78","status":"BLOCKED","stop_code":"blocked","reason":"动作 5b519e01f7cdd250e90d957c46a923ea（bash）的效果未知，须人工核实后再继续"},"verification_recorded":false}

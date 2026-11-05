@@ -1,0 +1,3 @@
+{"run_id":"a233545761d36518c3e8fe4a27a43499","marker_observed":true,"sent_signal":"SIGINT","sent_after_marker":true,"exit_code":130}
+{"run_id":"11fdbd66b7da8ff6e9999b709271360d","submitted":"-resume","exit_code":2}
+{"run_id":"d5f18b2de0102655f1eec9797651b846","timeout":"500ms","exit_code":3}

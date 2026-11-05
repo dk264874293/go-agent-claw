@@ -1,0 +1,85 @@
+{
+  "cancel": {
+    "run_id": "a233545761d36518c3e8fe4a27a43499",
+    "exit_code": 130,
+    "stop_code": "cancelled",
+    "action_id": "5b519e01f7cdd250e90d957c46a923ea",
+    "action_status": "CANCELLED",
+    "action_effect": "UNKNOWN",
+    "started": true,
+    "verified": false
+  },
+  "resume": {
+    "run_id": "11fdbd66b7da8ff6e9999b709271360d",
+    "exit_code": 2,
+    "status": "BLOCKED",
+    "model_calls_delta": 0,
+    "tool_calls_delta": 0,
+    "replayed": false,
+    "decision": "原运行在观察到 started 标记后被手动发送 SIGINT；标记仅证明动作已启动，不是验收成功证明。恢复的是同一任务，因遗留动作效果 UNKNOWN 而阻塞，未新增模型或工具调用，也未重放。继续前须人工核实原动作及进程的实际状态和外部效果，补充验收证据并明确处置该未知动作；确认可安全继续后再恢复，不应盲目重试。另一次 deadline 属于不同任务，不是此次中断或恢复的原因。"
+  },
+  "deadline": {
+    "run_id": "d5f18b2de0102655f1eec9797651b846",
+    "exit_code": 3,
+    "status": "BUDGET_EXHAUSTED",
+    "stop_code": "deadline",
+    "tool_calls": 0
+  },
+  "citations": [
+    {
+      "claim": "marker",
+      "path": "evidence/verification-started.txt",
+      "line": 1
+    },
+    {
+      "claim": "action",
+      "path": "evidence/launcher.jsonl",
+      "line": 1
+    },
+    {
+      "claim": "action",
+      "path": "evidence/signal-events.jsonl",
+      "line": 7
+    },
+    {
+      "claim": "action",
+      "path": "evidence/signal-events.jsonl",
+      "line": 8
+    },
+    {
+      "claim": "action",
+      "path": "evidence/signal-events.jsonl",
+      "line": 9
+    },
+    {
+      "claim": "resume",
+      "path": "evidence/signal-events.jsonl",
+      "line": 10
+    },
+    {
+      "claim": "resume",
+      "path": "evidence/signal-events.jsonl",
+      "line": 11
+    },
+    {
+      "claim": "resume",
+      "path": "evidence/launcher.jsonl",
+      "line": 2
+    },
+    {
+      "claim": "resume",
+      "path": "evidence/traces.jsonl",
+      "line": 2
+    },
+    {
+      "claim": "deadline",
+      "path": "evidence/deadline-events.jsonl",
+      "line": 4
+    },
+    {
+      "claim": "deadline",
+      "path": "evidence/launcher.jsonl",
+      "line": 3
+    }
+  ]
+}

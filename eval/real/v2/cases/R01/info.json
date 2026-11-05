@@ -1,0 +1,1 @@
+{"allowed_paths": [], "required_reads": ["cmd/claw/main.go", "internal/tools/scope.go", "internal/tools/registry.go"]}

@@ -1,0 +1,3 @@
+修复这个 Go 项目工具定义的线上兼容性回归。调用 OpenAI Responses API 时，注册 list_dir 后会在工具尚未执行前返回 HTTP 400，错误类型为 invalid_function_parameters。抓到的请求片段是 {"name":"list_dir","parameters":{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false,"required":null}}。
+
+请定位并修改共享工具定义的构造处。工具没有必填参数时，生成的参数定义不应出现 required 字段。有必填参数时必须原样保留现有必填字段及顺序，其他 schema 属性、工具执行行为和 Provider 配置都保持原有语义。把修复直接落到工作区源码，并说明改动。
