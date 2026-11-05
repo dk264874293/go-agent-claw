@@ -3,6 +3,7 @@
 .env
 
 /claw
+/claw-monitor
 
 /main
 .claw

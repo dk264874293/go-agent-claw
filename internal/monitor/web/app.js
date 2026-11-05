@@ -34,6 +34,7 @@ const qualityLabels = {
 };
 const eventLabels = {
   run_attempt_started: '开始运行尝试', run_finalized: '引擎收尾完成', run_returned: '调用已返回',
+  run_configured: '运行参数已记录', artifact_saved: '工具证据已保存', recorder_closed: '观测记录已关闭',
   task_event_committed: '任务事件已提交', model_started: '模型请求开始', model_finished: '模型请求结束',
   model_usage: '模型用量回执', tool_attempted: '工具调用尝试', tool_attempt: '工具调用尝试',
   tool_admission: '工具准入结果', tool_handler_started: '工具开始执行', tool_started: '工具开始执行',
@@ -98,7 +99,9 @@ function disclosure(key) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { Accept: 'application/json', ...(options.headers || {}) } });
+  let response;
+  try { response = await fetch(path, { credentials: 'same-origin', ...options, headers: { Accept: 'application/json', ...(options.headers || {}) } }); }
+  catch { throw new Error('无法连接本地观测服务，请检查服务是否仍在运行。'); }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) showLogin();

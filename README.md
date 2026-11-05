@@ -55,6 +55,17 @@ go test -race ./internal/...
 
 2026-11-05 的 v2 对照完成 30 个样本，新版 15/15、旧版 8/15，详见 [修复与评估结果](docs/real-task-repair-results-2026-11-05.md)。
 
+## 本地任务观测台
+
+```bash
+go build -o claw-monitor ./cmd/claw-monitor
+./claw-monitor -workspace /绝对路径/工作区
+```
+
+打开终端打印的本机地址，可查看任务历史、实时模型/工具/审批阶段、文件效果、验收与异常。支持重复传入 `-workspace` 和 `-eval-root`。页面只读，不发起任务或模型请求；新增运行的轻量观测默认写入 `~/.claw/observations/`，可通过 `CLAW_OBSERVE=off` 关闭。
+
+接口、日志保留、隐私与诊断边界见 [观测台使用与实现说明](docs/local-monitor.md)。
+
 ## 飞书入口
 
 `cmd/agentops` 是独立服务。配置 `OPENAI_API_KEY`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_VERIFY_TOKEN`、`FEISHU_ENCRYPT_KEY`，并将 `FEISHU_AGENTOPS_CONFIG` 指向配置文件。

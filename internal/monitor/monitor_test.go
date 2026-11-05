@@ -229,6 +229,7 @@ func TestRealEvaluationImport(t *testing.T) {
 	if pass["baseline"] != 8 || pass["candidate"] != 15 {
 		t.Fatal(pass)
 	}
+	verifyRealEvaluationRecords(t, base, x)
 }
 func findWorkspace(x *Index, task string) string {
 	for _, t := range x.Tasks("", "", "") {
