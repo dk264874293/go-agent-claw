@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
@@ -23,7 +24,7 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		return schema.ToolResult{}, err
 	}
 	actionID := newID()
-	ctx = context.WithValue(ctx, actionIDKey{}, actionID)
+	ctx = observe.WithAction(context.WithValue(ctx, actionIDKey{}, actionID), actionID)
 	ctx, span := observability.StartSpan(ctx, "Action")
 	span.AddAttribute("action_id", actionID)
 	span.AddAttribute("tool_call_id", call.ID)
@@ -48,6 +49,7 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		r.mu.Unlock()
 		if ok {
 			previous.ToolCallID = call.ID
+			observe.Emit(ctx, "receipt_reused", observe.Payload{Tool: call.Name, ToolCallID: call.ID, Status: string(previous.Status), Effect: string(previous.Effect), RequestDigest: observe.Digest(string(call.Arguments))})
 			return previous, nil
 		}
 	}
@@ -111,6 +113,7 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 			}
 			return result, fmt.Errorf("%w：保存动作证据失败: %w", errStorage, err)
 		}
+		observe.Emit(ctx, "artifact_saved", observe.Payload{Tool: call.Name, ArtifactID: id, ContentBytes: int64(len(result.Output))})
 		result.Output = truncateUTF8(result.Output, 4000) + "\n完整结果引用：" + id + "（可用 read_evidence 分段读取）"
 	}
 	if err := r.record("action_result", func(s *taskState) error {

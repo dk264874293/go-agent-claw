@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
@@ -39,13 +40,21 @@ type approvalManager struct {
 	pending map[string]pendingApproval
 }
 
-func (m *approvalManager) wait(ctx context.Context, target approvalTarget, approvers []string, notify func(context.Context, string, time.Time) error) error {
+func (m *approvalManager) wait(ctx context.Context, target approvalTarget, approvers []string, notify func(context.Context, string, time.Time) error) (err error) {
+	decision := "cancelled"
+	defer func() {
+		if decision != "notification_failed" && errors.Is(err, context.DeadlineExceeded) {
+			decision = "expired"
+		}
+		observe.Emit(ctx, "approval_resolved", observe.Payload{Tool: target.Tool, Decision: decision})
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	expiry, _ := ctx.Deadline()
+	observe.Emit(ctx, "approval_waiting", observe.Payload{Tool: target.Tool, ExpiresAt: &expiry})
 	id := rand.Text()
 	entry := pendingApproval{target: target, approvers: approvers, expires: expiry, decision: make(chan bool, 1)}
 	m.mu.Lock()
@@ -61,6 +70,7 @@ func (m *approvalManager) wait(ctx context.Context, target approvalTarget, appro
 	}()
 
 	if err := notify(ctx, id, expiry); err != nil {
+		decision = "notification_failed"
 		return fmt.Errorf("无法发送审批请求: %w", err)
 	}
 	select {
@@ -71,8 +81,10 @@ func (m *approvalManager) wait(ctx context.Context, target approvalTarget, appro
 			return err
 		}
 		if !allowed {
+			decision = "rejected"
 			return errors.New("审批已拒绝")
 		}
+		decision = "allowed"
 		return nil
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -274,19 +275,30 @@ func (b *FeishuBot) execute(ctx context.Context, session *ctxpkg.Session, bindin
 		spec.Kind = engine.TaskAnswer
 	}
 	reporter := &FeishuReporter{bot: b, chatID: msg.chatID}
+	ctx, attempt := observe.StartFromEnv(ctx, observe.Options{WorkDir: binding.WorkDir, Entry: "feishu", Goal: spec.Goal, Kind: string(spec.Kind), Mode: string(spec.Mode)})
+	defer attempt.Close()
 	result, err := b.run(ctx, session, spec, reporter, b.approval.guard(msg.chatID, msg.senderID, binding, b.send))
+	ctx = observe.WithTask(ctx, result.TaskID)
+	attempt.Returned(engine.ObservationResult(result, err))
 	if err != nil {
 		log.Printf("[飞书] 任务执行失败，任务 ID %s: %v", result.TaskID, err)
 	}
-	b.reply(b.ctx, msg.chatID, engine.FormatRunResult(result))
+	sendErr := b.reply(b.ctx, msg.chatID, engine.FormatRunResult(result))
+	status := "sent"
+	if sendErr != nil {
+		status = "failed"
+	}
+	observe.Emit(ctx, "delivery_attempted", observe.Payload{Entry: "feishu", Status: status})
 }
 
-func (b *FeishuBot) reply(parent context.Context, chatID, message string) {
+func (b *FeishuBot) reply(parent context.Context, chatID, message string) error {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
-	if err := b.send(ctx, chatID, message); err != nil && ctx.Err() == nil {
+	err := b.send(ctx, chatID, message)
+	if err != nil && ctx.Err() == nil {
 		log.Printf("[飞书] 发送状态失败: %v", err)
 	}
+	return err
 }
 
 // FeishuReporter 保留兼容接口，最终回复由 execute 在引擎退出后统一发布。

@@ -14,6 +14,7 @@ import (
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/taskstore"
@@ -50,6 +51,9 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		spec.ID = newID()
 	}
 	result.TaskID = spec.ID
+	parent = observe.WithTask(parent, spec.ID)
+	// 最先注册，最后执行：此时任务关闭、快照与 Trace 收尾均已结束。
+	defer func() { observe.Emit(parent, "run_finalized", ObservationResult(result, err)) }()
 	result.Status = Failed
 	if !e.options.Budget.valid() || e.options.MaxContextBytes < 1 {
 		result.Reason = "运行预算配置无效"
@@ -81,6 +85,20 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		return result.stop(parent, err)
 	}
 	defer task.Close()
+	observedMode := state.Spec.Mode
+	requestedMode := spec.Mode
+	if requestedMode == "" {
+		requestedMode = e.options.Mode
+	}
+	if modeLevel(requestedMode) < modeLevel(observedMode) {
+		observedMode = requestedMode
+	}
+	observe.Emit(parent, "run_configured", observe.Payload{
+		Kind: string(state.Spec.Kind), Mode: string(observedMode), Goal: state.Spec.Goal,
+		MaxModelCalls: int64(state.Limits.MaxModelCalls), MaxToolCalls: int64(state.Limits.MaxToolCalls),
+		MaxTurns: int64(state.Limits.MaxTurns), TimeoutMS: state.Limits.Timeout.Milliseconds(),
+		ModelCalls: int64(state.Usage.ModelCalls), ToolCalls: int64(state.Usage.ToolCalls), Turns: int64(state.Usage.Turns), ElapsedMS: state.Usage.Elapsed.Milliseconds(),
+	})
 	if state.LastResult != nil {
 		previous := *state.LastResult
 		previous.Delivery = deliveryFromState(state)
@@ -107,6 +125,7 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			return previous, nil
 		}
 	}
+
 	ctx, cancel := context.WithTimeout(parent, state.Limits.Timeout-state.Usage.Elapsed)
 	defer cancel()
 	mode := state.Spec.Mode
@@ -128,9 +147,11 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 				_, err := task.Append(kind, elapsedEvent{Version: state.Version, Elapsed: state.Usage.Elapsed})
 				return err
 			}
-			if _, err := task.Append(kind, state); err != nil {
+			event, err := task.Append(kind, state)
+			if err != nil {
 				return err
 			}
+			observe.Emit(observe.WithSourceSequence(ctx, event.Sequence), "task_event_committed", observe.Payload{SourceKind: kind, ModelCalls: int64(state.Usage.ModelCalls), ToolCalls: int64(state.Usage.ToolCalls), Turns: int64(state.Usage.Turns), ElapsedMS: state.Usage.Elapsed.Milliseconds()})
 			if len(state.Plan) > 0 && (kind == "plan" || kind == "plan_patch" || kind == "step_done" || kind == "finished") {
 				if err := task.SavePlanViews(planViews(state)); err != nil {
 					log.Printf("无法更新任务计划视图: %v", err)
@@ -379,9 +400,27 @@ func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.M
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	callCtx, span := observability.StartSpan(ctx, "LLM.Generate")
+	callCtx, span := observability.StartSpan(observe.WithModelCall(ctx, observe.NewID()), "LLM.Generate")
 	defer span.EndSpan()
+	var material []byte
+	if observe.Identity(callCtx).AttemptID != "" {
+		material, _ = json.Marshal(struct {
+			Messages []schema.Message
+			Tools    []schema.ToolDefinition
+		}{prepared, defs})
+	}
+	model := ""
+	if named, ok := e.provider.(interface{ ModelName() string }); ok {
+		model = named.ModelName()
+	}
+	started := time.Now()
+	observe.Emit(callCtx, "model_started", observe.Payload{Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ToolCount: int64(len(defs))})
 	msg, err := e.provider.Generate(callCtx, prepared, defs)
+	errorClass := observationError(err)
+	if msg == nil && err == nil {
+		errorClass = "empty_response"
+	}
+	observe.Emit(callCtx, "model_finished", observe.Payload{Model: model, Stage: modelStage(callCtx), DurationMS: time.Since(started).Milliseconds(), ErrorClass: errorClass})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -418,7 +457,7 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			if reporter != nil {
 				reporter.OnThinking(ctx)
 			}
-			thinking, err := e.generate(ctx, r, history, nil)
+			thinking, err := e.generate(context.WithValue(ctx, modelStageKey{}, "thinking"), r, history, nil)
 			if err != nil {
 				return "", err
 			}

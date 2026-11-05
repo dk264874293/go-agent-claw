@@ -16,6 +16,7 @@ import (
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 	"github.com/joho/godotenv"
@@ -88,8 +89,17 @@ func runCLI() int {
 }
 
 func submit(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session, reporter engine.Reporter, spec engine.TaskSpec) engine.RunResult {
+	ctx, attempt := observe.StartFromEnv(ctx, eng.ObservationOptions(sess.WorkDir, "cli", spec))
+	defer attempt.Close()
 	result, err := eng.Run(ctx, sess, spec, reporter)
-	fmt.Println(engine.FormatRunResult(result))
+	ctx = observe.WithTask(ctx, result.TaskID)
+	attempt.Returned(engine.ObservationResult(result, err))
+	_, printErr := fmt.Println(engine.FormatRunResult(result))
+	status := "printed"
+	if printErr != nil {
+		status = "failed"
+	}
+	observe.Emit(ctx, "delivery_attempted", observe.Payload{Entry: "cli", Status: status})
 	if err != nil && err.Error() != result.Reason {
 		fmt.Fprintf(os.Stderr, "运行错误: %v\n", err)
 	}

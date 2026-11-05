@@ -18,8 +18,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
@@ -140,6 +142,24 @@ type toolExecution interface {
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (result schema.ToolResult) {
+	if observe.Identity(ctx).ActionID == "" {
+		ctx = observe.WithAction(ctx, observe.NewID())
+	}
+	startedAt := time.Now()
+	attempted := observationForTool(call)
+	observe.Emit(ctx, "tool_attempted", attempted)
+	stage, handlerStarted := "context", false
+	defer func() {
+		payload := observationForTool(call)
+		payload.Stage, payload.Status, payload.Effect, payload.ErrorClass = stage, string(result.Status), string(result.Effect), result.ErrorKind
+		payload.ResultDigest = observe.Digest(result.Output)
+		payload.DurationMS = time.Since(startedAt).Milliseconds()
+		if !handlerStarted {
+			payload.Decision = "rejected"
+			observe.Emit(ctx, "tool_admission", payload)
+		}
+		observe.Emit(ctx, "tool_finished", payload)
+	}()
 	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
 	span.AddAttribute("tool_name", call.Name)
 	span.AddAttribute("tool_call_id", call.ID)
@@ -158,6 +178,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	if err := ctx.Err(); err != nil {
 		return cancelledBeforeExecution(call.ID, err)
 	}
+	stage = "registration"
 	r.mu.RLock()
 	tool, ok := r.tools[call.Name]
 	middlewares := append([]MiddlewareFunc(nil), r.middlewares...)
@@ -165,14 +186,17 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	if !ok {
 		return schema.NewToolResult(call.ID, fmt.Sprintf("未注册工具 %s", call.Name), schema.ToolRejected, schema.EffectNone, "未知工具", nil)
 	}
+	stage = "permission"
 	if err := requireTool(ctx, call.Name); err != nil {
 		return schema.NewToolResult(call.ID, err.Error(), schema.ToolRejected, schema.EffectNone, "权限不足", nil)
 	}
+	stage = "parameters"
 	if preflight, ok := tool.(toolPreflight); ok {
 		if err := preflight.validate(ctx, call.Arguments); err != nil {
 			return toolErrorResult(call, "", nil, err)
 		}
 	}
+	stage = "middleware"
 	for _, mw := range middlewares {
 		allowed, reason := mw(ctx, call)
 		if err := ctx.Err(); err != nil {
@@ -182,6 +206,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 			return schema.NewToolResult(call.ID, "执行被拦截: "+reason, schema.ToolRejected, schema.EffectNone, "准入拒绝", nil)
 		}
 	}
+	stage = "persist_hook"
 	if hook, _ := ctx.Value(executionHookKey{}).(func(context.Context) error); hook != nil {
 		if err := hook(ctx); err != nil {
 			return schema.NewToolResult(call.ID, err.Error(), schema.ToolRejected, schema.EffectNone, "执行前记录失败", nil)
@@ -192,6 +217,11 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	if err := ctx.Err(); err != nil {
 		return cancelledBeforeExecution(call.ID, err)
 	}
+	handlerStarted, stage = true, "handler"
+	admitted := observationForTool(call)
+	admitted.Decision = "allowed"
+	observe.Emit(ctx, "tool_admission", admitted)
+	observe.Emit(ctx, "tool_handler_started", observationForTool(call))
 	var output string
 	var exitCode *int
 	var err error

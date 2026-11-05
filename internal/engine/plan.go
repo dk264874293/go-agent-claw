@@ -98,7 +98,7 @@ func (e *AgentEngine) proposePlan(ctx context.Context, r *runState, system schem
 	}
 	notes := strings.Join(r.state.Progress, "\n")
 	instruction += "\n目标：" + r.state.Spec.Goal + "\n已记录进展：\n" + notes
-	reply, err := e.generate(ctx, r, []schema.Message{system, {Role: schema.RoleUser, Content: instruction}}, nil)
+	reply, err := e.generate(context.WithValue(ctx, modelStageKey{}, "planning"), r, []schema.Message{system, {Role: schema.RoleUser, Content: instruction}}, nil)
 	if err != nil {
 		return nil, err
 	}

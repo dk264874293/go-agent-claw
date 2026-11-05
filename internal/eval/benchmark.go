@@ -11,6 +11,7 @@ import (
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
@@ -99,9 +100,14 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase, p prov
 		Mode: tools.ModeTrusted, Budget: engine.Budget{MaxTurns: tc.MaxTurns},
 	})
 	registry.Register(tools.NewSubagentTool(eng, engine.NewExplorerRegistry(workDir), nil))
-	run, err := eng.Run(ctx, session, engine.TaskSpec{
-		Kind: engine.TaskChange, Goal: tc.TaskPrompt, VerifyCommand: tc.ValidateScript,
-	}, nil)
+	spec := engine.TaskSpec{Kind: engine.TaskChange, Goal: tc.TaskPrompt, VerifyCommand: tc.ValidateScript}
+	options := eng.ObservationOptions(workDir, "bench", spec)
+	options.Model = b.modelName
+	ctx, attempt := observe.StartFromEnv(ctx, options)
+	defer attempt.Close()
+	run, err := eng.Run(ctx, session, spec, nil)
+	ctx = observe.WithTask(ctx, run.TaskID)
+	attempt.Returned(engine.ObservationResult(run, err))
 	result.Status, result.Passed = run.Status, run.Status == engine.Verified
 	result.Usage, result.RunUsage = session.UsageSnapshot(), run.Usage
 	if err != nil {

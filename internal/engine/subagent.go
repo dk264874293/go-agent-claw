@@ -7,14 +7,24 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
-func (e *AgentEngine) RunSub(ctx context.Context, spec tools.SubtaskSpec, registry tools.Registry, rawReporter any) (tools.SubtaskReport, error) {
-	report := tools.SubtaskReport{Status: string(Failed)}
+func (e *AgentEngine) RunSub(ctx context.Context, spec tools.SubtaskSpec, registry tools.Registry, rawReporter any) (report tools.SubtaskReport, err error) {
+	report = tools.SubtaskReport{Status: string(Failed)}
+	parent := observe.Identity(ctx)
+	ctx = observe.WithAgent(ctx, observe.NewID(), parent.AgentID)
+	ctx = observe.WithAction(observe.WithModelCall(ctx, ""), "")
+	started := time.Now()
+	observe.Emit(ctx, "agent_queued", observe.Payload{ParentActionID: parent.ActionID})
+	defer func() {
+		observe.Emit(ctx, "agent_finished", observe.Payload{ParentActionID: parent.ActionID, Status: report.Status, ErrorClass: observationError(err), DurationMS: time.Since(started).Milliseconds()})
+	}()
 	r := currentRun(ctx)
 	if r == nil {
 		return report, errors.New("子任务必须使用父任务预算")
@@ -26,6 +36,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, spec tools.SubtaskSpec, regist
 		report.Status = string(Cancelled)
 		return report, ctx.Err()
 	}
+	observe.Emit(ctx, "agent_started", observe.Payload{ParentActionID: parent.ActionID})
 	scope := tools.ScopeFromContext(ctx)
 	if scope.DisableSubagent {
 		return report, errors.New("子任务不允许再次委派")

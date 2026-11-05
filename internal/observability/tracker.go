@@ -17,6 +17,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
@@ -175,9 +176,13 @@ type ModelPrice struct {
 
 type CostTracker struct {
 	nextProvider provider.LLMProvider
+	modelName    string
 	price        ModelPrice
 	session      *ctxpkg.Session
 }
+
+// ModelName 提供观测元数据，不触发模型调用。
+func (t *CostTracker) ModelName() string { return t.modelName }
 
 // NewCostTracker 按 CLAW_MODEL_PRICES 中的显式单价统计用量与费用。
 func NewCostTracker(next provider.LLMProvider, modelName string, session *ctxpkg.Session) *CostTracker {
@@ -188,7 +193,7 @@ func NewCostTracker(next provider.LLMProvider, modelName string, session *ctxpkg
 			prices = nil
 		}
 	}
-	return &CostTracker{nextProvider: next, price: prices[modelName], session: session}
+	return &CostTracker{nextProvider: next, modelName: modelName, price: prices[modelName], session: session}
 }
 
 func (t *CostTracker) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
@@ -214,6 +219,12 @@ func (t *CostTracker) Generate(ctx context.Context, msgs []schema.Message, avail
 	if t.session != nil {
 		t.session.RecordUsageReport(usage, cost)
 	}
+	payload := observe.Payload{Model: t.modelName, Cost: cost, Currency: price.Currency, InputPerMillion: price.InputPerMillion, OutputPerMillion: price.OutputPerMillion}
+	if usage != nil {
+		input, output := int64(usage.PromptTokens), int64(usage.CompletionTokens)
+		payload.InputTokens, payload.OutputTokens = &input, &output
+	}
+	observe.Emit(ctx, "model_usage", payload)
 	tokensText := "未知"
 	if usage != nil {
 		tokensText = fmt.Sprintf("输入 %d / 输出 %d", usage.PromptTokens, usage.CompletionTokens)

@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -57,4 +58,10 @@ func TestFinalReportUsesServiceContextAndSendsOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 默认测试不向用户的全局观测目录写入；接线测试单独启用临时目录。
+func TestMain(m *testing.M) {
+	os.Setenv("CLAW_OBSERVE", "off")
+	os.Exit(m.Run())
 }
