@@ -1,0 +1,3 @@
+给这份 Go 源码快照补一个版本冲突回归测试。只新增 internal/tools/version_conflict_test.go，测试函数命名为 TestConcurrentEditRejectsStaleVersion。已有实现是正确的，请保持生产代码原样。
+
+用临时工作区创建一个含有两个不同、各自能唯一定位的文本片段的文件。通过实际注册表调用 read_file 取得文件版本。向实际注册表并发提交两个 edit_file 请求，共用刚读到的版本，各编辑一个不同的片段。测试不要依赖哪个请求先完成。应断言恰好一个结果为 SUCCEEDED/CONFIRMED，另一个为 REJECTED/NONE 且 ErrorKind 为「版本冲突」，并读取磁盘确认最终内容只体现成功请求的修改。即使失败请求的 old_text 仍然可唯一定位，也必须拒绝陈旧版本。只使用标准库和快照中的包，测试不需要访问网络或使用密钥。

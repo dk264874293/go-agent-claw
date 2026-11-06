@@ -1,97 +1,103 @@
-// cmd/agentops/main.go
 package main
 
 import (
-    "context"
-    "log"
-    "net/http"
-    "os"
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
-    ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
-    "github.com/dk264874293/go-agent-claw/internal/engine"
-    "github.com/dk264874293/go-agent-claw/internal/feishu"
-    "github.com/dk264874293/go-agent-claw/internal/observability"
-    "github.com/dk264874293/go-agent-claw/internal/provider"
-    "github.com/dk264874293/go-agent-claw/internal/schema"
-    "github.com/dk264874293/go-agent-claw/internal/tools"
-	"github.com/joho/godotenv"
+	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/feishu"
+	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/provider"
+	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
+	"github.com/dk264874293/go-agent-claw/internal/tools"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
-	// 加载 .env 文件
-	godotenv.Overload()
-    log.Println("🚀 正在启动 go-tiny-claw AgentOps 飞书服务端...")
+	if err := runtimeenv.LoadDotenv(true); err != nil {
+		log.Fatal(err)
+	}
+	if err := runtimeenv.ApplyDefaults(); err != nil {
+		log.Fatal(err)
+	}
+	if err := serve(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-    if os.Getenv("ZHIPU_API_KEY") == "" || os.Getenv("FEISHU_APP_ID") == "" {
-        log.Fatal("❌ 请先导出 ZHIPU_API_KEY 和 飞书相关的环境变量")
-    }
+func serve() error {
+	appID, secret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET")
+	verifyToken, encryptKey := os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY")
+	if appID == "" || secret == "" || verifyToken == "" || encryptKey == "" {
+		return errors.New("请设置 FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_VERIFY_TOKEN 和 FEISHU_ENCRYPT_KEY")
+	}
+	model, llm, err := configuredModelProvider()
+	if err != nil {
+		return err
+	}
+	configPath := os.Getenv("FEISHU_AGENTOPS_CONFIG")
+	if configPath == "" {
+		return errors.New("请用 FEISHU_AGENTOPS_CONFIG 指定群聊配置文件")
+	}
+	config, err := feishu.LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
 
-    // 1. 设定监控的物理工作区
-    workDir, _ := os.Getwd()
-    workDir += "/workspace"
-    if err := os.MkdirAll(workDir, 0755); err != nil {
-        log.Fatalf("无法创建工作区: %v", err)
-    }
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client := lark.NewClient(appID, secret, lark.WithReqTimeout(8*time.Second))
+	bot, err := feishu.NewFeishuBot(ctx, config, client, func(ctx context.Context, session *ctxpkg.Session, spec engine.TaskSpec, reporter engine.Reporter, admit tools.MiddlewareFunc) (engine.RunResult, error) {
+		registry := engine.NewWorkspaceRegistry(session.WorkDir)
+		registry.Use(admit)
+		runner := engine.NewAgentEngine(observability.NewCostTracker(llm, model, session), registry, engine.EngineOptions{Mode: spec.Mode})
+		registry.Register(tools.NewSubagentTool(runner, engine.NewExplorerRegistry(session.WorkDir), reporter))
+		return runner.Run(ctx, session, spec, reporter)
+	})
+	if err != nil {
+		return err
+	}
+	defer bot.Close()
 
-    // 2. 初始化底层大脑与注册表
-    modelName := "glm-4.5-air"
-    llmProvider := provider.NewZhipuOpenAIProvider(modelName)
+	handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher(appID, verifyToken, encryptKey))
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /webhook/event", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		handler(w, r)
+	})
+	address := os.Getenv("FEISHU_LISTEN_ADDR")
+	if address == "" {
+		address = "127.0.0.1:48080"
+	}
+	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	log.Printf("飞书 Webhook 正在监听 %s", address)
+	err = server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
 
-    registry := tools.NewRegistry()
-    registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewEditFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir)) // 必备的运维工具
-
-    // 3. 【核心防御】：注入安全拦截 Middleware
-    registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
-        argsStr := string(call.Arguments)
-
-        // 检查是否命中危险命令黑名单
-        if feishu.IsDangerousCommand(call.Name, argsStr) {
-            taskID := call.ID
-            log.Printf("[Middleware] 拦截到高危操作: %s，触发飞书审批挂起...\n", call.Name)
-
-            // 【驾驭魔术】：从 Context 中优雅地取出专属于发起该请求群聊的 Reporter！
-            // 注意这里的强转，因为我们在 WaitForApproval 中需要调用 FeishuReporter 特有的 sendMsg。
-            currentReporter, _ := feishu.ReporterFromContext(ctx).(*feishu.FeishuReporter)
-
-            // 当前 Goroutine 死死挂起，向飞书发送卡片，等待人类决定
-            allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(taskID, call.Name, argsStr, currentReporter)
-
-            if !allowed {
-                return false, reason // 拒绝，将理由作为 ToolResult 喂回给大模型
-            }
-            return true, "" // 同意，放行底层物理执行
-        }
-
-        // 普通读取命令，YOLO 放行
-        return true, ""
-    })
-    log.Println("🛡️ 安全防御 Middleware 已挂载。")
-
-    // 4. 动态 Factory 组装器：保证高并发调用的物理独立性与账单准确追踪
-    engineFactory := func(session *ctxpkg.Session) *engine.AgentEngine {
-        // 让 Tracker 绑定当前特定用户的 Session 账本
-        trackedProvider := observability.NewCostTracker(llmProvider, modelName, session)
-
-        // 返回一个新组装的 Engine 实例
-        return engine.NewAgentEngine(trackedProvider, registry, false, false)
-    }
-
-    // 5. 初始化飞书 Bot 调度中心
-    bot := feishu.NewFeishuBotWithFactory(engineFactory, workDir)
-    handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher())
-
-    // 6. 注册 Webhook 路由并启动 HTTP Server
-    http.HandleFunc("/webhook/event", handler)
-
-    port := ":48080"
-    log.Printf("📡 Webhook 服务已启动，正在监听端口 %s，请配置 ngrok...\n", port)
-
-    err := http.ListenAndServe(port, nil)
-    if err != nil {
-        log.Fatalf("服务器启动失败: %v", err)
-    }
+func configuredModelProvider() (string, provider.LLMProvider, error) {
+	channel, model, err := provider.ResolveModelConfig(os.Getenv("CLAW_PROVIDER"), os.Getenv("CLAW_MODEL"))
+	if err != nil {
+		return model, nil, fmt.Errorf("请检查 CLAW_PROVIDER 和 CLAW_MODEL: %w", err)
+	}
+	llm, err := provider.NewConfiguredProvider(channel, model)
+	return model, llm, err
 }

@@ -2,58 +2,95 @@
 package context
 
 import (
-    "sync"
-    "time"
+	"sync"
+	"time"
 
-    "github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
 // Session 代表了一次持续的人机交互过程。它负责维护该会话的完整历史。
 type Session struct {
-    ID        string
-    WorkDir   string // 该会话绑定的物理工作区
-    CreatedAt time.Time
-    UpdatedAt time.Time
+	ID        string
+	WorkDir   string // 该会话绑定的物理工作区
+	CreatedAt time.Time
+	UpdatedAt time.Time
 
-    // 【新增】用于统计该 Session 累计消耗的资源
-    TotalPromptTokens     int
-    TotalCompletionTokens int
-    TotalCostCNY          float64
+	// 【新增】用于统计该 Session 累计消耗的资源
+	TotalPromptTokens     int
+	TotalCompletionTokens int
+	TotalCostCNY          float64
+	unknownCostCalls      int
+	unknownUsageCalls     int
 
-    // 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
-    history []schema.Message
-    mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
+	// 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
+	history []schema.Message
+	mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
+}
+
+// UsageSnapshot 是同一时刻的会话用量与计费快照。
+type UsageSnapshot struct {
+	PromptTokens      int
+	CompletionTokens  int
+	CostCNY           float64
+	CostKnown         bool
+	TokensKnown       bool
+	UnknownCostCalls  int
+	UnknownUsageCalls int
 }
 
 // RecordUsage 是一个给外部 Tracker 调用的辅助方法，用于累加账单
 func (s *Session) RecordUsage(prompt int, completion int, cost float64) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.TotalPromptTokens += prompt
-    s.TotalCompletionTokens += completion
-    s.TotalCostCNY += cost
+	s.RecordUsageReport(&schema.Usage{PromptTokens: prompt, CompletionTokens: completion}, &cost)
+}
+
+// RecordUsageReport 使用 nil 标记尚未获得的用量或人民币费用。
+func (s *Session) RecordUsageReport(usage *schema.Usage, costCNY *float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if usage == nil {
+		s.unknownUsageCalls++
+	} else {
+		s.TotalPromptTokens += usage.PromptTokens
+		s.TotalCompletionTokens += usage.CompletionTokens
+	}
+	if usage == nil || costCNY == nil {
+		s.unknownCostCalls++
+	} else {
+		s.TotalCostCNY += *costCNY
+	}
+}
+
+func (s *Session) UsageSnapshot() UsageSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return UsageSnapshot{
+		PromptTokens: s.TotalPromptTokens, CompletionTokens: s.TotalCompletionTokens,
+		CostCNY: s.TotalCostCNY, CostKnown: s.unknownCostCalls == 0,
+		TokensKnown: s.unknownUsageCalls == 0, UnknownCostCalls: s.unknownCostCalls,
+		UnknownUsageCalls: s.unknownUsageCalls,
+	}
 }
 
 func NewSession(id string, workDir string) *Session {
-    return &Session{
-        ID:        id,
-        WorkDir:   workDir,
-        CreatedAt: time.Now(),
-        UpdatedAt: time.Now(),
-        history:   make([]schema.Message, 0),
-    }
+	return &Session{
+		ID:        id,
+		WorkDir:   workDir,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		history:   make([]schema.Message, 0),
+	}
 }
 
 // Append 线程安全地向 Session 中追加消息
 func (s *Session) Append(msgs ...schema.Message) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.history = append(s.history, msgs...)
-    s.UpdatedAt = time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = append(s.history, msgs...)
+	s.UpdatedAt = time.Now()
 
-    // 【持久化预留点】：在真实的工业级实现中（如 Claude Code），
-    // 我们会在这里将 s.history 以 JSONL 的格式 Append 到 workDir/.claw/sessions/xxx.jsonl 中。
-    // s.SaveToDisk()
+	// 【持久化预留点】：在真实的工业级实现中（如 Claude Code），
+	// 我们会在这里将 s.history 以 JSONL 的格式 Append 到 workDir/.claw/sessions/xxx.jsonl 中。
+	// s.SaveToDisk()
 }
 
 // MessageCount 返回会话历史中的消息总数（用户输入、模型回复与工具结果均计入）
@@ -72,7 +109,6 @@ func (s *Session) ResetHistory() {
 	s.history = make([]schema.Message, 0)
 	s.UpdatedAt = time.Now()
 }
-
 
 // syntheticContextNotice 是方案 A 兜底时注入的合成 user 前缀。
 // 它不进入 Session 历史，每次开窗时现做，只为满足“会话以 user 开场”的 API 校验。
@@ -141,23 +177,23 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 // ==========================================
 
 type SessionManager struct {
-    sessions map[string]*Session
-    mu       sync.RWMutex
+	sessions map[string]*Session
+	mu       sync.RWMutex
 }
 
 var GlobalSessionMgr = &SessionManager{
-    sessions: make(map[string]*Session),
+	sessions: make(map[string]*Session),
 }
 
 // GetOrCreate 获取或创建一个会话
 func (sm *SessionManager) GetOrCreate(id string, workDir string) *Session {
-    sm.mu.Lock()
-    defer sm.mu.Unlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 
-    if sess, exists := sm.sessions[id]; exists {
-        return sess
-    }
-    sess := NewSession(id, workDir)
-    sm.sessions[id] = sess
-    return sess
+	if sess, exists := sm.sessions[id]; exists {
+		return sess
+	}
+	sess := NewSession(id, workDir)
+	sm.sessions[id] = sess
+	return sess
 }

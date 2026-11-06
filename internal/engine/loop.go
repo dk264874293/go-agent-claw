@@ -2,325 +2,751 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
+	"github.com/dk264874293/go-agent-claw/internal/observability"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/taskstore"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
-    "github.com/dk264874293/go-agent-claw/internal/observability"
 )
 
-
 type AgentEngine struct {
-    provider       provider.LLMProvider
-    registry       tools.Registry
-    EnableThinking bool
-	PlanMode       bool // 暴露给外部的计划模式开关
-	compactor *ctxpkg.Compactor // 压缩器实例
-	recovery *ctxpkg.RecoveryManager // 自愈管理器
-	injector *ReminderInjector // 提醒注入器
+	provider  provider.LLMProvider
+	registry  tools.Registry
+	options   EngineOptions
+	compactor *ctxpkg.Compactor
+	recovery  *ctxpkg.RecoveryManager
 }
 
-// 移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool,planMode bool) *AgentEngine {
-    return &AgentEngine{
-        provider:       p,
-        registry:       r,
-        EnableThinking: enableThinking,
-		PlanMode:       planMode,
-        // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
-        compactor:      ctxpkg.NewCompactor(300000, 10),
-		recovery: 		ctxpkg.NewRecoveryManager(), // 初始化 Recovery }
-		injector: 		NewReminderInjector(), // 【初始化注入器】
-    }
+func NewAgentEngine(p provider.LLMProvider, registry tools.Registry, options EngineOptions) *AgentEngine {
+	if options.Mode == "" {
+		options.Mode = tools.ModeReadOnly
+	}
+	if options.MaxContextBytes == 0 {
+		options.MaxContextBytes = 300000
+	}
+	return &AgentEngine{
+		provider: p, registry: registry, options: options,
+		compactor: ctxpkg.NewCompactor(options.MaxContextBytes, 10),
+		recovery:  ctxpkg.NewRecoveryManager(),
+	}
 }
 
-// Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
-	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
+func newID() string { return taskstore.NewID() }
 
-    // 【埋点 1】：开启 Root Span，记录整个任务的生命周期 
-    ctx, rootSpan := observability.StartSpan(ctx, "Agent.Run")
-    rootSpan.AddAttribute("SessionID", session.ID)
-    rootSpan.AddAttribute("WorkDir", session.WorkDir)
-
-    // defer 保证在引擎退出时，无论成功失败，都能结束根 Span 并导出 Trace 报告
-    defer func() {
-        rootSpan.EndSpan()
-        _ = observability.ExportTraceToFile(rootSpan, session.WorkDir, session.ID)
-        log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存至工作区的 .claw/traces 目录下\n")
-    }()
-
-	// 根据当前 Session 的工作区，动态组装最新的 System Prompt、
-	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
-    systemMsg := composer.Build()
-
-    turnCount := 0
-	// 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
-	for {
-        turnCount++
-        done, err := func() (bool, error) {
-            // 【埋点 2】：记录单次 Turn 循环
-            turnCtx, turnSpan := observability.StartSpan(ctx, fmt.Sprintf("Turn-%d", turnCount))
-            defer turnSpan.EndSpan()
-            
-            // 获取当前挂载的所有工具定义
-            availableTools := e.registry.GetAvailableTools()
-
-            // 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory
-            // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
-            workingMemory := session.GetWorkingMemory(20)
-
-            var contextHistory []schema.Message
-            contextHistory = append(contextHistory, systemMsg)
-            contextHistory = append(contextHistory, workingMemory...)
-            
-            // 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
-            // 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
-            compactedContext := e.compactor.Compact(contextHistory)
-
-            // 记录发给模型的实际上下文大小，非常有助于排查幻觉
-            turnSpan.AddAttribute("context_message_count", len(compactedContext))
-
-            var currentTurnThinkingContent string
-            // ====================================================================
-            // Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
-            // ====================================================================
-            if e.EnableThinking {
-                if reporter != nil {
-                    // 【触发 Reporter】: 开始慢思考
-                    reporter.OnThinking(turnCtx)
-                }
-                thinkCtx, thinkSpan := observability.StartSpan(turnCtx, "LLM.Thinking")
-                thinkResp, err := e.provider.Generate(thinkCtx, compactedContext, nil)
-                thinkSpan.EndSpan()
-
-                if err != nil {
-                    return true, fmt.Errorf("Thinking 阶段生成失败: %w", err)
-                }
-
-                if thinkResp.Content != "" {
-                    currentTurnThinkingContent = thinkResp.Content
-                    // 将思考过程持久化到 Session 中！
-                    session.Append(*thinkResp)
-                    // 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
-                    compactedContext = append(compactedContext, *thinkResp)
-                }
-            }
-
-            // 【埋点 4】：记录 Action 调用
-            actCtx, actSpan := observability.StartSpan(turnCtx, "LLM.Action")
-            // 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
-            actionResp, err := e.provider.Generate(actCtx, compactedContext, availableTools)
-            actSpan.EndSpan() // 结束行动跨度
-
-            if err != nil {
-                return true, fmt.Errorf("Action 阶段生成失败: %w", err)
-            }
-            finalAssistantMsg := schema.Message{
-                Role:      schema.RoleAssistant,
-                Content:   strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
-                ToolCalls: actionResp.ToolCalls,
-            }
-            // 将大模型的行动响应持久化到 Session 中 
-            session.Append(finalAssistantMsg)
-            // 将模型的响应完整追加到上下文历史中
-            // compactedContext = append(compactedContext, *actionResp)
-
-            if actionResp.Content != "" && reporter != nil {
-                // 【触发 Reporter】: 输出阶段性总结或最终回复
-                reporter.OnMessage(ctx, actionResp.Content)
-            }
-
-            if len(actionResp.ToolCalls) == 0 {
-                log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
-                return true, nil
-            }
-
-            //  ================= 并发执行底层工具 =================
-            observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
-            var wg sync.WaitGroup
-
-            // 用于收集本轮执行的最后一个工具，供 Reminder 探测器分析
-            // (在真实的工业级架构中，如果并发调用了多个工具，我们可以逐个分析或仅分析报错的那个。这里简化为取第一个)
-            var lastToolCall schema.ToolCall
-            var lastToolResult schema.ToolResult
-
-
-            for i, toolCall := range actionResp.ToolCalls {
-                wg.Add(1) // 增加计数器
-                // 开启协程。注意：一定要将索引 i 和 toolCall 作为参数传入匿名函数，防止闭包变量捕获陷阱！
-                go func(idx int, call schema.ToolCall) {
-                    defer wg.Done() // 协程结束时计数器减一
-                    log.Printf("  -> [Go-%d] 🛠️ 触发并行执行: %s\n", idx, call.Name)
-                    if reporter != nil {
-                        // 【触发 Reporter】: 报告即将在底层执行的工具
-                        reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
-                    }
-                    // 调用底层 Registry 执行工具（物理操作）
-                    result := e.registry.Execute(turnCtx, call)
-
-                    // 【核心拦截与注入】
-                    finalOutput := result.Output
-                    if result.IsError {
-                        // 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
-                        finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-                        log.Printf("  -> [Go-%d] ❌ 注入救援指南: %s\n", idx, finalOutput)
-                    } else {
-                        log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
-                    }
-
-                    if reporter != nil {
-                        // 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
-                        // 注意：传递给大模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 是缩略版
-                        displayOutput := result.Output
-                        if len(displayOutput) > 200 {
-                            displayOutput = displayOutput[:200] + "... (已截断)"
-                        }
-                        // 【触发 Reporter】: 汇报工具物理执行的结果
-                        reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
-                    }
-
-                    // 将执行结果封装为一条用户消息 (RoleUser)
-                    obsMsg := schema.Message{
-                        Role:       schema.RoleUser,
-                        Content:    result.Output,
-                        ToolCallID: call.ID,
-                    }
-                    // 【线程安全】: 由于每个 Goroutine 操作的是预分配切片的不同索引，
-                    // 这里不需要加锁 (Mutex)，性能极高！
-                    observationMsgs[idx] = obsMsg
-
-                    if idx == 0 { 
-                        lastToolCall = call 
-                        lastToolResult = result 
-                    }
-                }(i, toolCall) // 闭包传参
-            }
-
-            // 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
-            wg.Wait()
-            log.Println("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
-            // 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
-            // 1. 先将普通的工具执行结果存入 Session
-            session.Append(observationMsgs...)
-            // 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
-            reminderMsg := e.injector.CheckAndInject(lastToolCall, lastToolResult)
-            if reminderMsg != nil {
-                // 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
-                // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
-                session.Append(*reminderMsg)
-            }
-            return false, nil
-        }()
-        if err != nil {
-            return err
-        }
-        if done {
-            break
-        }
+func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec TaskSpec, reporter Reporter) (result RunResult, err error) {
+	result.RunID = newID()
+	if spec.ID == "" && !spec.Resume {
+		spec.ID = newID()
+	}
+	result.TaskID = spec.ID
+	parent = observe.WithTask(parent, spec.ID)
+	// 最先注册，最后执行：此时任务关闭、快照与 Trace 收尾均已结束。
+	defer func() { observe.Emit(parent, "run_finalized", ObservationResult(result, err)) }()
+	result.Status = Failed
+	if !e.options.Budget.valid() || e.options.MaxContextBytes < 1 || e.options.AnalysisContextBytes < 0 {
+		result.Reason = "运行预算配置无效"
+		return result, errors.New(result.Reason)
+	}
+	if err := parent.Err(); err != nil {
+		return result.stop(parent, err)
+	}
+	workDir, err := filepath.EvalSymlinks(session.WorkDir)
+	if err == nil {
+		workDir, err = filepath.Abs(workDir)
+	}
+	if err != nil {
+		result.Reason = "无法定位工作区"
+		return result, err
+	}
+	store, err := taskstore.Open(workDir)
+	if errors.Is(err, taskstore.ErrBusy) {
+		result.Status, result.Reason = Blocked, "工作区已有运行中的主任务"
+		return result, nil
+	}
+	if err != nil {
+		return result.stop(parent, fmt.Errorf("%w：无法打开工作区任务存储: %w", errStorage, err))
+	}
+	defer store.Close()
+	task, state, err := e.openTask(store, workDir, session.ID, spec)
+	if err != nil {
+		return result.stop(parent, err)
+	}
+	defer task.Close()
+	// 直接调用引擎也需要内部根身份；不创建 Recorder、不强制新增观测落盘。
+	if (state.Spec.Analysis || readonlyAnswer(state.Spec)) && observe.Identity(parent).AgentID == "" {
+		parent = observe.WithAgent(parent, newID(), "")
+	}
+	observedMode := state.Spec.Mode
+	requestedMode := spec.Mode
+	if requestedMode == "" {
+		requestedMode = e.options.Mode
+	}
+	if modeLevel(requestedMode) < modeLevel(observedMode) {
+		observedMode = requestedMode
+	}
+	observe.Emit(parent, "run_configured", observe.Payload{
+		Analysis: state.Spec.Analysis, Delegation: state.Spec.Delegation,
+		Kind: string(state.Spec.Kind), Mode: string(observedMode), Goal: state.Spec.Goal,
+		MaxModelCalls: int64(state.Limits.MaxModelCalls), MaxToolCalls: int64(state.Limits.MaxToolCalls),
+		MaxTurns: int64(state.Limits.MaxTurns), TimeoutMS: state.Limits.Timeout.Milliseconds(),
+		ModelCalls: int64(state.Usage.ModelCalls), ToolCalls: int64(state.Usage.ToolCalls), Turns: int64(state.Usage.Turns), ElapsedMS: state.Usage.Elapsed.Milliseconds(),
+	})
+	if state.LastResult != nil {
+		previous := *state.LastResult
+		previous.Delivery = deliveryFromState(state)
+		if previous.Status == Answered {
+			if state.Spec.Analysis {
+				previous.Reason = "复用历史分析答复；引用仅说明原运行当时的读取版本，未重新核对当前文件"
+			}
+			return previous, nil
+		}
+		if previous.Status == Verified {
+			version, checkErr := WorkspaceVersion(parent, workDir)
+			if checkErr != nil {
+				return result.stop(parent, checkErr)
+			}
+			if previous.Verification != nil && previous.Verification.Version == version {
+				return previous, nil
+			}
+			previous.Status = NeedsVerification
+			previous.Reason = "工作区已变化，原验收证据已失效"
+			previous.StopCode = "verification_stale"
+			previous.FinalText = ""
+			if previous.Verification != nil {
+				evidence := *previous.Verification
+				evidence.Passed = false
+				previous.Verification = &evidence
+			}
+			return previous, nil
+		}
 	}
 
-	return nil
+	ctx, cancel := context.WithTimeout(parent, state.Limits.Timeout-state.Usage.Elapsed)
+	defer cancel()
+	mode := state.Spec.Mode
+	requested := spec.Mode
+	if requested == "" {
+		requested = e.options.Mode
+	}
+	if modeLevel(requested) < modeLevel(mode) {
+		mode = requested
+	}
+	ctx = tools.WithScope(ctx, tools.ExecutionScope{Mode: mode, WorkDir: workDir})
+	ctx, span := observability.StartSpan(ctx, "Agent.Run")
+	span.AddAttribute("run_id", result.RunID)
+	span.AddAttribute("task_id", result.TaskID)
+	r := &runState{
+		state: state, started: time.Now(), elapsed: state.Usage.Elapsed,
+		persist: func(kind string, state taskState) error {
+			if kind == "elapsed" {
+				_, err := task.Append(kind, elapsedEvent{Version: state.Version, Elapsed: state.Usage.Elapsed})
+				return err
+			}
+			event, err := task.Append(kind, state)
+			if err != nil {
+				return err
+			}
+			observe.Emit(observe.WithSourceSequence(ctx, event.Sequence), "task_event_committed", observe.Payload{SourceKind: kind, ModelCalls: int64(state.Usage.ModelCalls), ToolCalls: int64(state.Usage.ToolCalls), Turns: int64(state.Usage.Turns), ElapsedMS: state.Usage.Elapsed.Milliseconds()})
+			if len(state.Plan) > 0 && (kind == "plan" || kind == "plan_patch" || kind == "step_done" || kind == "finished") {
+				if err := task.SavePlanViews(planViews(state)); err != nil {
+					log.Printf("无法更新任务计划视图: %v", err)
+				}
+			}
+			return nil
+		},
+		artifact: task.SaveArtifact, readArtifact: task.ReadArtifact, readArtifactPage: task.ReadArtifactPage,
+		runID: result.RunID, subSlots: make(chan struct{}, 2),
+	}
+	ctx = context.WithValue(ctx, runContextKey{}, r)
+	var system schema.Message
+	clockDone, clockStop := make(chan error, 1), make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-clockStop:
+				clockDone <- nil
+				return
+			case <-ctx.Done():
+				clockDone <- nil
+				return
+			case <-ticker.C:
+				if clockErr := r.record("elapsed", func(*taskState) error { return nil }); clockErr != nil {
+					clockDone <- clockErr
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		if r.readonlyAnswer() {
+			result.Reading = r.readingCoverage(ctx)
+		}
+		if r.analysisEnabled() {
+			result.Analysis = r.analysisReport(ctx)
+		}
+		if storageErr := r.storageError(); storageErr != nil {
+			err = errors.Join(err, storageErr)
+		}
+		if errors.Is(err, errStorage) {
+			result.Status, result.Reason, result.StopCode = Failed, err.Error(), "storage_error"
+		}
+		if result.Status != Answered && result.Status != Verified && result.Status != NeedsVerification {
+			partial, partialErr := e.partialForStop(ctx, r, session, system, result)
+			result.PartialReport = partial
+			if partialErr != nil {
+				err = errors.Join(err, partialErr)
+				result.Status, result.Reason, result.StopCode = Failed, partialErr.Error(), "storage_error"
+			} else if (result.Status == BudgetExhausted || result.StopCode == "readonly_repeat") && errors.Is(ctx.Err(), context.Canceled) {
+				result.Status, result.Reason, result.StopCode = Cancelled, "任务已取消", "cancelled"
+			}
+		}
+		// 收尾仍属于执行时间。计时落盘持续覆盖最后一次模型请求，之后才汇总故障。
+		close(clockStop)
+		if clockErr := <-clockDone; clockErr != nil {
+			err = errors.Join(err, clockErr)
+			result.Status, result.Reason, result.StopCode = Failed, "无法保存任务计时", "storage_error"
+		}
+		if storageErr := r.storageError(); storageErr != nil {
+			err = errors.Join(err, storageErr)
+			result.Status, result.Reason, result.StopCode = Failed, storageErr.Error(), "storage_error"
+		}
+		if result.Status != Answered && result.Status != Verified && result.Status != NeedsVerification {
+			result.FinalText = ""
+		}
+		if result.StopCode == "" {
+			result.StopCode = strings.ToLower(string(result.Status))
+		}
+		if err != nil && result.Reason == "" {
+			result.Reason = err.Error()
+		}
+		if saveErr := r.record("finished", func(s *taskState) error {
+			result.Usage = s.Usage
+			result.Usage.Elapsed = r.elapsed + time.Since(r.started)
+			result.Verification = s.Verification
+			result.Delivery = deliveryFromState(*s)
+			if s.Spec.Analysis && s.Analysis != nil {
+				if report, ok := s.Analysis.Reports[observe.Identity(ctx).AgentID]; ok {
+					result.Analysis = &report
+				}
+			}
+			s.LastResult = &result
+			s.Reading = result.Reading
+			return nil
+		}); saveErr != nil {
+			err = errors.Join(err, saveErr)
+			result.Status, result.Reason, result.StopCode = Failed, "无法保存任务终态", "storage_error"
+			result.FinalText = ""
+			result.PartialReport = r.recordedPartial(result.Reason, "任务记录未可靠保存，以下仅为现场执行观察。")
+		} else if saveErr := task.SaveSnapshot(r.state); saveErr != nil {
+			log.Printf("无法更新任务检查点，任务日志仍可用于恢复: %v", saveErr)
+		}
+		span.AddAttribute("status", result.Status)
+		span.AddAttribute("stop_code", result.StopCode)
+		span.AddAttribute("model_calls", result.Usage.ModelCalls)
+		span.AddAttribute("tool_calls", result.Usage.ToolCalls)
+		span.EndSpan()
+		if traceErr := observability.ExportTraceToFile(span, workDir, result.RunID); traceErr != nil {
+			log.Printf("无法导出任务追踪: %v", traceErr)
+		}
+	}()
+	if err := r.record("started", func(s *taskState) error { s.Reading = nil; return nil }); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result.stop(ctx, err)
+	}
+	if reason, err := e.reconcile(ctx, r); err != nil {
+		return result.stop(ctx, err)
+	} else if reason != "" {
+		result.Status, result.Reason = Blocked, reason
+		return result, nil
+	}
+	if spec.Resume {
+		r.resumeReceipts = make(map[string]schema.ToolResult, len(r.state.Completed))
+		for key, receipt := range r.state.Completed {
+			r.resumeReceipts[key] = receipt
+		}
+	}
+	if spec.Resume && state.Verification != nil && state.Verification.Passed {
+		version, checkErr := WorkspaceVersion(ctx, workDir)
+		if checkErr != nil {
+			return result.stop(ctx, checkErr)
+		}
+		if version == state.Verification.Version {
+			result.Status, result.Reason = Verified, "已核实中断前保存的验收证据"
+			return result, nil
+		}
+		if err := r.record("verification_stale", func(s *taskState) error {
+			s.Verification.Passed = false
+			return nil
+		}); err != nil {
+			return result, err
+		}
+	}
+	if state.Spec.VerifyCommand != "" && mode != tools.ModeTrusted {
+		result.Status, result.Reason = Blocked, "当前任务权限不足以执行已指定的验收命令"
+		return result, nil
+	}
+
+	session.Append(schema.Message{Role: schema.RoleUser, Content: state.Spec.Goal})
+	system = ctxpkg.NewPromptComposer(workDir, false).Build()
+	system.Content += "\n\n执行模式：" + string(mode) + "。工具准入由程序控制。"
+	if spec.Resume {
+		if err := r.resumedReadonlyStop(ctx); err != nil {
+			return result.stop(ctx, err)
+		}
+	}
+	if r.toolsExhausted() {
+		return result.stop(ctx, toolLimit())
+	}
+	if state.Spec.Plan && len(state.Plan) == 0 {
+		steps, err := e.proposePlan(ctx, r, system, "")
+		if err != nil {
+			return result.stop(ctx, err)
+		}
+		if err := r.record("plan", func(s *taskState) error { s.Plan = steps; return nil }); err != nil {
+			return result, err
+		}
+	}
+	text, err := e.runTask(ctx, r, session, system, reporter)
+	if err != nil {
+		return result.stop(ctx, err)
+	}
+	result.FinalText = text
+	if r.analysisEnabled() {
+		result.Analysis = r.analysisReport(ctx)
+	}
+	switch {
+	case r.state.Verification != nil && r.state.Verification.Passed:
+		result.Status, result.Reason = Verified, "指定验收已通过，工作区版本已核对"
+	case r.state.Spec.Kind == TaskChange || r.state.Spec.VerifyCommand != "":
+		result.Status, result.Reason = NeedsVerification, "修改任务尚未取得有效验收证据"
+	default:
+		result.Status, result.Reason = Answered, "已交付回复"
+	}
+	return result, nil
 }
 
+func (r RunResult) stop(ctx context.Context, err error) (RunResult, error) {
+	r.FinalText = ""
+	r.Reason = err.Error()
+	var limit budgetLimit
+	var readonlyStop readonlyRepeatStop
+	var networkError net.Error
+	switch {
+	case errors.Is(err, errStorage):
+		r.Status, r.StopCode = Failed, "storage_error"
+		return r, err
+	case errors.Is(ctx.Err(), context.Canceled), errors.Is(err, context.Canceled):
+		r.Status, r.StopCode = Cancelled, "cancelled"
+	case errors.As(err, &limit):
+		r.Status, r.StopCode = BudgetExhausted, limit.code
+	case errors.Is(err, errBudget):
+		r.Status, r.StopCode = BudgetExhausted, "budget_exhausted"
+	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		r.Status, r.StopCode = BudgetExhausted, "deadline"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &networkError) && networkError.Timeout():
+		// 请求自身的超时不能证明任务累计时限已到达。
+		r.Status, r.StopCode = Failed, "request_timeout"
+		return r, err
+	case errors.As(err, &readonlyStop):
+		r.Status, r.StopCode = Blocked, "readonly_repeat"
+	case errors.Is(err, errAnalysisReportInvalid):
+		r.Status, r.StopCode = Blocked, "analysis_report_invalid"
+	case errors.Is(err, errContextBudget), errors.Is(err, errBlocked):
+		r.Status, r.StopCode = Blocked, "blocked"
+	default:
+		r.Status = Failed
+		return r, err
+	}
+	return r, nil
+}
 
-// RunSub 是专为 Subagent 拉起的一次性受限循环。
-// 它不依赖外部 Session，打完就跑。
-// Reporter：为了让用户在终端看到子智能体的工作轨迹，我们将主线程的 Reporter 透传进来，并打上特殊标记。
-func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry tools.Registry, reporter any) (string, error) {
+var errBlocked = errors.New("任务已阻塞")
 
-    // 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
-    contextHistory := []schema.Message{
-        {
-            Role: schema.RoleSystem,
-            Content: `你是一个专门负责深度探索的探路者 (Explorer Subagent)。
-你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。
+func (e *AgentEngine) runTask(ctx context.Context, r *runState, session *ctxpkg.Session, system schema.Message, reporter Reporter) (string, error) {
+	var text string
+	patchUsed := false
+	for {
+		idx := readyStep(r.state.Plan)
+		if idx < 0 {
+			break
+		}
+		step := r.state.Plan[idx]
+		var err error
+		text, err = e.converse(ctx, r, session, system, e.registry, reporter, step.ID, step.Goal, 0)
+		if err != nil {
+			var readonlyStop readonlyRepeatStop
+			if errors.As(err, &readonlyStop) {
+				return text, err
+			}
+			if !errors.Is(err, errBlocked) || len(r.state.Pending) != 0 || patchUsed {
+				return text, err
+			}
+			patchUsed = true
+			steps, patchErr := e.proposePlan(ctx, r, system, err.Error())
+			if patchErr != nil {
+				return text, patchErr
+			}
+			if err := r.record("plan_patch", func(s *taskState) error { s.Plan = steps; return nil }); err != nil {
+				return text, err
+			}
+			continue
+		}
+		if err := r.record("step_done", func(s *taskState) error {
+			s.Plan[idx].Done = true
+			r.note(s, "步骤 "+step.ID+"： "+text)
+			return nil
+		}); err != nil {
+			return text, err
+		}
+	}
+	if len(r.state.Plan) == 0 {
+		var err error
+		text, err = e.converse(ctx, r, session, system, e.registry, reporter, "", "", 0)
+		if err != nil {
+			return text, err
+		}
+	}
+	if r.state.Spec.VerifyCommand == "" {
+		return text, nil
+	}
+	for {
+		evidence, err := e.verify(ctx, r, reporter)
+		if err != nil {
+			return text, err
+		}
+		if err := r.record("verification", func(s *taskState) error { s.Verification = evidence; return nil }); err != nil {
+			return text, err
+		}
+		if evidence.Passed {
+			return text, nil
+		}
+		// 仅在修复改变工作区版本后重新执行验收。
+		session.Append(schema.Message{Role: schema.RoleUser, Content: "指定验收未通过：\n" + evidence.Output})
+		text, err = e.converse(ctx, r, session, system, e.registry, reporter, "verify-fix", "根据验收证据修复问题", 0)
+		if err != nil {
+			return text, err
+		}
+		current, err := WorkspaceVersion(ctx, r.state.WorkDir)
+		if err != nil || current == evidence.Version {
+			return text, err
+		}
+	}
+}
 
-【核心纪律】
-1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！
-2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。
-3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报来做下一步决策。`,
-        },
-        {
-            Role:    schema.RoleUser,
-            Content: taskPrompt,
-        },
-    }
+func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.Message, defs []schema.ToolDefinition) (*schema.Message, error) {
+	return e.generateRequest(ctx, r, msgs, defs, false)
+}
 
-    // 限制子智能体最多只能跑 10 个 Turn，防止它自己卡死
-    const maxSubTurns = 10
-    turnCount := 0
+// generateRequest 共享预算上下文、压缩、调用和观测。收尾使用原子准入而不是再次扣模型次数。
+func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []schema.Message, defs []schema.ToolDefinition, closing bool) (*schema.Message, error) {
+	snapshot := r.requestBudgetSnapshot(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		snapshot.RemainingMS = min(snapshot.RemainingMS, max(int64(0), time.Until(deadline).Milliseconds()))
+	}
+	request := append([]schema.Message(nil), msgs...)
+	if block := r.readingContext(ctx); block != "" {
+		if len(request) > 0 && request[0].Role == schema.RoleSystem {
+			request[0].Content += "\n" + block
+		} else {
+			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+		}
+	}
+	if block := func() string {
+		if r.analysisEnabled() {
+			return ""
+		}
+		return r.readContext(ctx)
+	}(); block != "" {
+		if len(request) > 0 && request[0].Role == schema.RoleSystem {
+			request[0].Content += "\n\n" + block
+		} else {
+			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+		}
+	}
+	var prepared []schema.Message
+	var delivered []string
+	var stats analysisRequestStats
+	var err error
+	if r.analysisEnabled() {
+		prepared, delivered, stats, err = e.prepareAnalysisRequest(ctx, r, withBudgetContext(request, snapshot), defs)
+	} else {
+		prepared, err = e.compactor.CompactWithin(withBudgetContext(request, snapshot), defs)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w：%v", errContextBudget, err)
+	}
+	if closing {
+		if err := r.reserveClosing(ctx); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := r.reserve(ctx, "model"); err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	callCtx, span := observability.StartSpan(observe.WithModelCall(ctx, observe.NewID()), "LLM.Generate")
+	defer span.EndSpan()
+	var material []byte
+	if observe.Identity(callCtx).AttemptID != "" {
+		material, _ = json.Marshal(struct {
+			Messages []schema.Message
+			Tools    []schema.ToolDefinition
+		}{prepared, defs})
+	}
+	model := ""
+	if named, ok := e.provider.(interface{ ModelName() string }); ok {
+		model = named.ModelName()
+	}
+	started := time.Now()
+	observe.Emit(callCtx, "model_started", observe.Payload{Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ToolCount: int64(len(defs)), SourceBytes: stats.source, AnalysisBytes: stats.notes, EvidenceBytes: stats.evidence, ActionBytes: stats.actions, SchemaBytes: stats.schema, FoldedReads: stats.folded, SoftTargetBytes: stats.target, SoftTargetExceeded: stats.over})
+	msg, err := e.provider.Generate(callCtx, prepared, defs)
+	errorClass := observationError(err)
+	if msg == nil && err == nil {
+		errorClass = "empty_response"
+	}
+	observe.Emit(callCtx, "model_finished", observe.Payload{Model: model, Stage: modelStage(callCtx), DurationMS: time.Since(started).Milliseconds(), ErrorClass: errorClass})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("模型调用失败: %w", err)
+	}
+	if msg == nil {
+		return nil, errors.New("模型没有返回消息")
+	}
+	r.markAnalysisDelivered(ctx, delivered)
+	r.markReadExposure(ctx, prepared)
+	return msg, nil
+}
 
-    for {
-        turnCount++
-        if turnCount > maxSubTurns {
-            return "", fmt.Errorf("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns)
-        }
+func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg.Session, system schema.Message, registry tools.Registry, reporter Reporter, stepID, stepGoal string, subTurns int) (string, error) {
+	failures := make(map[string]int)
+	for turn := 0; ; turn++ {
+		if r.toolsExhausted() {
+			return "", toolLimit()
+		}
+		if subTurns > 0 {
+			if turn >= subTurns {
+				return "", fmt.Errorf("%w：子任务达到 %d 轮", errBlocked, subTurns)
+			}
+		} else if err := r.reserve(ctx, "turn"); err != nil {
+			return "", err
+		}
+		prompt := system
+		if subTurns == 0 {
+			if r.analysisEnabled() || r.efficiencyEnabled() {
+				prompt.Content += r.analysisAnchor(stepGoal)
+			} else {
+				anchor, _ := json.Marshal(struct {
+					Goal     string   `json:"goal"`
+					Step     string   `json:"step,omitempty"`
+					Progress []string `json:"progress,omitempty"`
+				}{r.state.Spec.Goal, stepGoal, r.state.Progress})
+				prompt.Content += "\n\n当前任务（结构化数据）：" + string(anchor)
+			}
+		}
+		history := append([]schema.Message{prompt}, session.GetWorkingMemory(20)...)
+		if r.analysisEnabled() {
+			history = append([]schema.Message{prompt}, analysisHistory(session)...)
+		}
+		if subTurns == 0 && e.options.EnableThinking {
+			if reporter != nil {
+				reporter.OnThinking(ctx)
+			}
+			thinking, err := e.generate(context.WithValue(ctx, modelStageKey{}, "thinking"), r, history, nil)
+			if err != nil {
+				return "", err
+			}
+			if thinking.Content != "" {
+				history = append(history, schema.Message{Role: schema.RoleAssistant, Content: thinking.Content, ResponseItems: thinking.ResponseItems})
+			}
+		}
+		msg, err := e.generate(ctx, r, history, r.visibleTools(ctx, registry))
+		if err != nil {
+			return "", err
+		}
+		text := strings.TrimSpace(msg.Content)
+		var analysis *AnalysisReport
+		if r.analysisEnabled() && (text != "" || len(msg.ToolCalls) == 0) {
+			analysis, err = r.acceptAnalysis(ctx, text, len(msg.ToolCalls) == 0)
+			if err != nil {
+				return "", err
+			}
+		}
+		if len(msg.ToolCalls) == 0 {
+			if text == "" {
+				return "", fmt.Errorf("%w：模型没有交付内容", errBlocked)
+			}
+			session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ResponseItems: msg.ResponseItems})
+			if analysis != nil && subTurns == 0 {
+				return RenderAnalysis(*analysis), nil
+			}
+			return text, nil
+		}
+		seen := make(map[string]bool, len(msg.ToolCalls))
+		for _, call := range msg.ToolCalls {
+			if call.ID == "" || seen[call.ID] {
+				return "", fmt.Errorf("%w：模型返回的工具调用 ID 缺失或重复", errBlocked)
+			}
+			seen[call.ID] = true
+		}
+		session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ToolCalls: msg.ToolCalls, ResponseItems: msg.ResponseItems})
+		results, batchErr := e.executeBatch(ctx, r, registry, reporter, msg.ToolCalls, stepID)
+		var observations []schema.Message
+		var stopped error
+		var boundaryErr error
+		var readonlyCandidates []ReadonlyFailureBoundary
+		for i, result := range results {
+			call := msg.ToolCalls[i]
+			content := observation(result)
+			if result.IsError {
+				content = e.recovery.AnalyzeAndInject(call.Name, content)
+			}
+			evidenceID := ""
+			if result.Read != nil {
+				evidenceID = result.Read.EvidenceID
+			}
+			readActionID := ""
+			if result.Read != nil {
+				readActionID = result.Read.ActionID
+			}
+			observations = append(observations, schema.Message{Role: schema.RoleUser, ToolCallID: call.ID, ToolStatus: result.Status, Content: content, ReadEvidenceID: evidenceID, ReadActionID: readActionID})
+			trackedReadonly := false
+			if subTurns == 0 {
+				boundary, trackErr := r.noteReadonlyResult(ctx, stepID, call, result)
+				if trackErr != nil {
+					boundaryErr = errors.Join(boundaryErr, trackErr)
+				} else if boundary != nil {
+					trackedReadonly = true
+					if boundary.Stopped {
+						readonlyCandidates = append(readonlyCandidates, *boundary)
+					}
+				}
+			}
+			key := actionKey(stepID, call)
+			if !result.IsError {
+				delete(failures, key)
+			} else {
+				failures[key]++
+				if failures[key] >= 3 && stopped == nil && !trackedReadonly {
+					stopped = fmt.Errorf("%w：工具 %s 的同一请求已失败三次", errBlocked, call.Name)
+				}
+			}
+		}
+		session.Append(observations...)
+		if batchErr != nil {
+			return "", batchErr
+		}
+		if boundaryErr != nil {
+			return "", boundaryErr
+		}
+		for _, candidate := range readonlyCandidates {
+			if current := r.unresolvedReadonlyBoundary(candidate.ID); current != nil && stopped == nil {
+				stopped = readonlyRepeatStop{Boundary: *current}
+			}
+		}
+		if stopped != nil {
+			var readonlyStop readonlyRepeatStop
+			if errors.As(stopped, &readonlyStop) {
+				if err := r.record("readonly_failure", func(s *taskState) error {
+					if r.fatalStorage != nil {
+						return r.fatalStorage
+					}
+					s.ReadonlyStopID = readonlyStop.Boundary.ID
+					return nil
+				}); err != nil {
+					return "", err
+				}
+			}
+			return "", stopped
+		}
+	}
+}
 
-        // 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
-        availableTools := readOnlyRegistry.GetAvailableTools()
+func observation(result schema.ToolResult) string {
+	header := fmt.Sprintf("执行状态：%s，效果：%s", result.Status, result.Effect)
+	if result.ErrorCode != "" {
+		header += "，错误码：" + result.ErrorCode
+	}
+	if result.Retryable != nil {
+		if *result.Retryable {
+			header += "，当前前提下可重试"
+		} else {
+			header += "，当前前提下同请求不应重试，请修正目标或跳过"
+		}
+	}
+	if result.ExitCode != nil {
+		header += fmt.Sprintf("，退出码：%d", *result.ExitCode)
+	}
+	return header + "\n" + result.Output
+}
 
-        compactedContext := e.compactor.Compact(contextHistory)
+func actionKey(stepID string, call schema.ToolCall) string {
+	raw := []byte(call.Arguments)
+	var data any
+	if json.Unmarshal(raw, &data) == nil {
+		raw, _ = json.Marshal(data)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(stepID+"\x00"+call.Name+"\x00"+string(raw))))
+}
 
-        // 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
-        actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
-        if err != nil {
-            return "", fmt.Errorf("子智能体推理失败: %w", err)
-        }
-
-        contextHistory = append(contextHistory, *actionResp)
-
-        // 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
-        if len(actionResp.ToolCalls) == 0 {
-            // 直接将它的这段汇报内容剥离出来返回给上层
-            return actionResp.Content, nil
-        }
-
-        // 执行只读工具的并发循环
-        observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
-        var wg sync.WaitGroup
-
-        for i, toolCall := range actionResp.ToolCalls {
-            wg.Add(1)
-            go func(idx int, call schema.ToolCall) {
-                defer wg.Done()
-
-                // 【可视化的关键】：让终端用户看到 Subagent 正在干嘛
-                var r Reporter
-                if reporter != nil {
-                    r = reporter.(Reporter)
-                    r.OnToolCall(ctx, fmt.Sprintf("[Subagent] %s", call.Name), string(call.Arguments))
-                }
-
-                result := readOnlyRegistry.Execute(ctx, call)
-
-                finalOutput := result.Output
-                if result.IsError {
-                    finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-                }
-
-                if reporter != nil {
-                    display := finalOutput
-                    if len(display) > 200 {
-                        display = display[:200] + "... (已截断)"
-                    }
-                    r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", call.Name), display, result.IsError)
-                }
-
-                observationMsgs[idx] = schema.Message{
-                    Role:       schema.RoleUser,
-                    Content:    finalOutput,
-                    ToolCallID: call.ID,
-                }
-            }(i, toolCall)
-        }
-
-        wg.Wait()
-        contextHistory = append(contextHistory, observationMsgs...)
-    }
+func (e *AgentEngine) executeBatch(ctx context.Context, r *runState, registry tools.Registry, reporter Reporter, calls []schema.ToolCall, stepID string) ([]schema.ToolResult, error) {
+	results := make([]schema.ToolResult, len(calls))
+	errs := make([]error, len(calls))
+	next := 0
+	var batchErr error
+	for next < len(calls) && batchErr == nil {
+		end := next + 1
+		name := calls[next].Name
+		if tools.IsReadOnly(name) {
+			for end < len(calls) && end-next < 4 && tools.IsReadOnly(calls[end].Name) {
+				end++
+			}
+		} else if name == "spawn_subagent" && end < len(calls) && calls[end].Name == name {
+			end++
+		}
+		if end-next == 1 {
+			results[next], errs[next] = e.execute(ctx, r, registry, reporter, calls[next], stepID, false)
+		} else {
+			var wg sync.WaitGroup
+			for i := next; i < end; i++ {
+				wg.Go(func() { results[i], errs[i] = e.execute(ctx, r, registry, reporter, calls[i], stepID, false) })
+			}
+			wg.Wait()
+		}
+		for i := next; i < end; i++ {
+			if errs[i] != nil {
+				batchErr = errs[i]
+				break
+			}
+		}
+		next = end
+	}
+	for i := range results {
+		if results[i].Status == "" {
+			results[i] = schema.ToolResult{ToolCallID: calls[i].ID, Status: schema.ToolRejected, Effect: schema.EffectNone, IsError: true, Output: "任务已停止，本次调用未执行"}
+		}
+	}
+	return results, batchErr
 }

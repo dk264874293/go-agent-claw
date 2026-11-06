@@ -3,5 +3,13 @@
 .env
 
 /claw
+/claw-monitor
 
 /main
+.claw
+
+.zcode
+
+.go-cache/
+
+internal/engine/testdata

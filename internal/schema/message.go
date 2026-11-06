@@ -14,48 +14,123 @@ import "encoding/json"
 type Role string
 
 const (
-    RoleSystem    Role = "system"    // 系统提示词：确立 Agent 的性格与红线
-    RoleUser      Role = "user"      // 用户输入 / 工具执行的返回结果 (Observation)
-    RoleAssistant Role = "assistant" // 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
+	RoleSystem    Role = "system"    // 系统提示词：确立 Agent 的性格与红线
+	RoleUser      Role = "user"      // 用户输入 / 工具执行的返回结果 (Observation)
+	RoleAssistant Role = "assistant" // 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
 )
 
 // Usage 记录了单次大模型 API 调用的 Token 消耗
 type Usage struct {
-    PromptTokens     int `json:"prompt_tokens"`     // 输入的 Token 数量
-    CompletionTokens int `json:"completion_tokens"` // 产生的 Token 数量
+	PromptTokens     int `json:"prompt_tokens"`     // 输入的 Token 数量
+	CompletionTokens int `json:"completion_tokens"` // 产生的 Token 数量
 }
 
 // Message 代表上下文中传递的单条消息
 type Message struct {
-    Role    Role   `json:"role"`
-    Content string `json:"content"` // 存放纯文本内容
-    // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
-    ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-    // 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
-    ToolCallID string `json:"tool_call_id,omitempty"`
-    //是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
-     Usage *Usage `json:"usage,omitempty"`
+	Role    Role   `json:"role"`
+	Content string `json:"content"` // 存放纯文本内容
+	// 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ResponseItems 保存 Responses API 的原始输出项，供后续工具轮按原顺序回放。
+	ResponseItems []json.RawMessage `json:"response_items,omitempty"`
+	// 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolStatus ToolStatus `json:"tool_status,omitempty"`
+	// ReadEvidenceID 是引擎绑定的观察身份，不发送给 Provider；不能按可能复用的 ToolCallID 猜测来源。
+	ReadEvidenceID string `json:"-"`
+	// ReadActionID 在普通读取与分析读取间统一定位观察，避免跨轮复用 ToolCallID 串联来源。
+	ReadActionID string `json:"-"`
+	//是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // ToolCall 代表模型请求调用某个具体的工具
 type ToolCall struct {
-    ID        string          `json:"id"`   // 工具调用的唯一 ID
-    Name      string          `json:"name"` // 想要调用的工具名称 (例如 "bash")
-    // Arguments 存放 JSON 参数。使用 RawMessage 是为了延迟解析，将解析责任交给具体的工具
-    Arguments json.RawMessage `json:"arguments"` 
+	ID   string `json:"id"`   // 工具调用的唯一 ID
+	Name string `json:"name"` // 想要调用的工具名称 (例如 "bash")
+	// Arguments 存放 JSON 参数。使用 RawMessage 是为了延迟解析，将解析责任交给具体的工具
+	Arguments json.RawMessage `json:"arguments"`
 }
 
-// ToolResult 代表工具在本地执行完毕后返回的物理结果
+type ToolStatus string
+
+const (
+	ToolSucceeded ToolStatus = "SUCCEEDED"
+	ToolRejected  ToolStatus = "REJECTED"
+	ToolFailed    ToolStatus = "FAILED"
+	ToolCancelled ToolStatus = "CANCELLED"
+)
+
+type EffectStatus string
+
+const (
+	EffectNone      EffectStatus = "NONE"
+	EffectConfirmed EffectStatus = "CONFIRMED"
+	EffectUnknown   EffectStatus = "UNKNOWN"
+)
+
+// ToolResult 分别记录工具执行状态和效果是否已知。
 type ToolResult struct {
-    ToolCallID string `json:"tool_call_id"`
-    Output     string `json:"output"`   // 工具执行的控制台输出或报错堆栈
-    IsError    bool   `json:"is_error"` // 标记是否失败，供后续的驾驭工程进行错误自愈
+	ToolCallID string            `json:"tool_call_id"`
+	Output     string            `json:"output"`
+	Status     ToolStatus        `json:"status"`
+	Effect     EffectStatus      `json:"effect"`
+	ErrorKind  string            `json:"error_kind,omitempty"`
+	ErrorCode  string            `json:"error_code,omitempty"`
+	Retryable  *bool             `json:"retryable,omitempty"`
+	ExitCode   *int              `json:"exit_code,omitempty"`
+	IsError    bool              `json:"is_error"`
+	Read       *ReadReceipt      `json:"read,omitempty"`
+	Discovery  *DiscoveryReceipt `json:"discovery,omitempty"`
+	// ReadContent 只在执行进程内传递实际交付的源字节，由引擎按需保存为不可变证据。
+	ReadContent []byte `json:"-"`
+}
+
+// ReadReceipt 记录一次成功读取实际交付的源码范围，不证明文件当前仍是该版本。
+type ReadReceipt struct {
+	Path       string      `json:"path"`
+	Version    string      `json:"version"`
+	ByteStart  int64       `json:"byte_start"`
+	ByteEnd    int64       `json:"byte_end"`
+	FirstLine  int         `json:"first_line"`
+	LastLine   int         `json:"last_line"`
+	TotalBytes int64       `json:"total_bytes"`
+	AgentID    string      `json:"agent_id,omitempty"`
+	ActionID   string      `json:"action_id,omitempty"`
+	EvidenceID string      `json:"evidence_id,omitempty"`
+	ArtifactID string      `json:"artifact_id,omitempty"`
+	Review     *ReadReview `json:"review,omitempty"`
+}
+
+// ReadReview 只描述复核目标；引擎校验目标是否属于当前任务及是否仍可用。
+type ReadReview struct {
+	TargetID string `json:"target_id"`
+	Question string `json:"question"`
+}
+
+// DiscoveryReceipt 仅记录本次有界发现清单及当时的文件大小，不证明版本或读取完成。
+type DiscoveryReceipt struct {
+	ManifestID string           `json:"manifest_id"`
+	Path       string           `json:"path"`
+	NameGlob   string           `json:"name_glob"`
+	Files      []DiscoveredFile `json:"files"`
+	Truncated  bool             `json:"truncated"`
+	Unreadable int              `json:"unreadable"`
+}
+
+type DiscoveredFile struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+}
+
+func NewToolResult(id, output string, status ToolStatus, effect EffectStatus, errorKind string, exitCode *int) ToolResult {
+	return ToolResult{ToolCallID: id, Output: output, Status: status, Effect: effect,
+		ErrorKind: errorKind, ExitCode: exitCode, IsError: status != ToolSucceeded}
 }
 
 // ToolDefinition 描述了一个大模型可以调用的工具元信息 (供模型理解工具有什么用)
 type ToolDefinition struct {
-    Name        string      `json:"name"`
-    Description string      `json:"description"`
-    InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
 }
-

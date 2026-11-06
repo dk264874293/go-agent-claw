@@ -1,119 +1,173 @@
-// internal/feishu/approval.go
 package feishu
 
 import (
-    "fmt"
-    "log"
-    "regexp"
-    "sync"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/observe"
+	"github.com/dk264874293/go-agent-claw/internal/schema"
+	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
-// ApprovalResult 审批结果包
-type ApprovalResult struct {
-    Allowed bool
-    Reason  string
+type approvalTarget struct {
+	ChatID   string
+	ActorID  string
+	ActionID string
+	Tool     string
+	Path     string
+	Before   string
+	After    string
+	Digest   [32]byte
 }
 
-// ApprovalManager 统一管理当前正在等待人类审批的任务
-type ApprovalManager struct {
-    mu           sync.RWMutex
-    // Key 是用于审批的唯一 TaskID，Value 是接收审批结果的 Channel
-    pendingTasks map[string]chan ApprovalResult
+type pendingApproval struct {
+	target    approvalTarget
+	approvers []string
+	expires   time.Time
+	decision  chan bool
 }
 
-// 全局单例，方便在 Registry Middleware 和 Feishu Webhook 之间共享状态
-var GlobalApprovalMgr = &ApprovalManager{
-    pendingTasks: make(map[string]chan ApprovalResult),
+type approvalManager struct {
+	mu      sync.Mutex
+	pending map[string]pendingApproval
 }
 
-// WaitForApproval 发送飞书通知，并阻塞当前协程等待回调结果
-func (m *ApprovalManager) WaitForApproval(taskID string, toolName string, args string, reporter *FeishuReporter) (bool, string) {
-    // 1. 创建用于阻塞当前引擎协程的 channel (容量为 1 防止死锁)
-    ch := make(chan ApprovalResult, 1)
+func (m *approvalManager) wait(ctx context.Context, target approvalTarget, approvers []string, notify func(context.Context, string, time.Time) error) (err error) {
+	decision := "cancelled"
+	defer func() {
+		if decision != "notification_failed" && errors.Is(err, context.DeadlineExceeded) {
+			decision = "expired"
+		}
+		observe.Emit(ctx, "approval_resolved", observe.Payload{Tool: target.Tool, Decision: decision})
+	}()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	expiry, _ := ctx.Deadline()
+	observe.Emit(ctx, "approval_waiting", observe.Payload{Tool: target.Tool, ExpiresAt: &expiry})
+	id := rand.Text()
+	entry := pendingApproval{target: target, approvers: approvers, expires: expiry, decision: make(chan bool, 1)}
+	m.mu.Lock()
+	if m.pending == nil {
+		m.pending = make(map[string]pendingApproval)
+	}
+	m.pending[id] = entry
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.pending, id)
+		m.mu.Unlock()
+	}()
 
-    m.mu.Lock()
-    m.pendingTasks[taskID] = ch
-    m.mu.Unlock()
-
-    // 2. 通过 Reporter 向飞书发送请求信息
-    // (在实际的高级应用中，这里可以构建一张带有交互 Button 的精致飞书卡片)
-    noticeMsg := fmt.Sprintf(`⚠️ **高危操作审批请求**
-Agent 试图执行以下动作:
-- 工具: %s
-- 参数: %s
-
-任务 ID: **%s**
-
-👉 请在此消息下方回复 "approve %s" 或 "reject %s" 来决定是否放行。`, toolName, args, taskID, taskID, taskID)
-
-    // 注意：因为 Middleware 的签名里没有带 Reporter，我们在 main.go 里初始化时必须把 reporter 传进来
-    if reporter != nil {
-        reporter.sendMsg(noticeMsg)
-    } else {
-        // 回退到终端打印 (兼容本地 CLI 模式)
-        fmt.Printf("\n\033[31m[需要审批 TaskID: %s]\033[0m %s\n", taskID, noticeMsg)
-    }
-
-    log.Printf("[Approval] 已发送审批请求 (TaskID: %s)，协程挂起等待...\n", taskID)
-
-    // 3. 【驾驭核心】：死死阻塞，等待飞书 Webhook 唤醒！
-    result := <-ch
-
-    // 4. 获取到结果后，清理内存资源
-    m.mu.Lock()
-    delete(m.pendingTasks, taskID)
-    m.mu.Unlock()
-
-    return result.Allowed, result.Reason
+	if err := notify(ctx, id, expiry); err != nil {
+		decision = "notification_failed"
+		return fmt.Errorf("无法发送审批请求: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case allowed := <-entry.decision:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !allowed {
+			decision = "rejected"
+			return errors.New("审批已拒绝")
+		}
+		decision = "allowed"
+		return nil
+	}
 }
 
-// ResolveApproval 由飞书 Webhook 回调触发，向 channel 发送信号解开阻塞
-func (m *ApprovalManager) ResolveApproval(taskID string, allowed bool, reason string) {
-    m.mu.RLock()
-    ch, exists := m.pendingTasks[taskID]
-    m.mu.RUnlock()
-
-    if exists {
-        log.Printf("[Approval] 收到来自飞书的审批结果 (TaskID: %s, Allowed: %v)\n", taskID, allowed)
-        ch <- ApprovalResult{Allowed: allowed, Reason: reason}
-    } else {
-        log.Printf("[Approval] 找不到对应的 TaskID: %s，可能已超时或处理完毕\n", taskID)
-    }
+func (m *approvalManager) resolve(chatID, approver, id string, allow bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.pending[id]
+	if !ok || entry.target.ChatID != chatID || !slices.Contains(entry.approvers, approver) || !time.Now().Before(entry.expires) {
+		return false
+	}
+	delete(m.pending, id)
+	entry.decision <- allow
+	return true
 }
 
-// IsDangerousCommand 简单的正则检查黑名单，判断该工具调用是否需要触发人类审批
-func IsDangerousCommand(toolName string, args string) bool {
-    // 白名单放行：对于纯读取工具，默认 YOLO 模式，全部放行
-    if toolName == "read_file" {
-        return false
-    }
+type sendMessage func(context.Context, string, string) error
 
-    // 【剧本设定】：在生产服务器的 AgentOps 场景下，修改任何文件都是高危操作！
-    // 我们不允许 Agent 擅自使用 write_file 覆写文件，或使用 edit_file 篡改代码。
-    if toolName == "write_file" || toolName == "edit_file" {
-        return true
-    }
+func (m *approvalManager) guard(chatID, actorID string, binding ChatBinding, send sendMessage) tools.MiddlewareFunc {
+	return func(ctx context.Context, call schema.ToolCall) (bool, string) {
+		scope := tools.ScopeFromContext(ctx)
+		if scope.WorkDir != binding.WorkDir || scope.Mode != binding.Mode {
+			return false, "动作的工作区或权限不符合群聊配置"
+		}
+		if tools.IsReadOnly(call.Name) || call.Name == "spawn_subagent" {
+			return true, ""
+		}
+		if err := ctx.Err(); err != nil {
+			return false, "任务已取消或到期"
+		}
+		if len(call.Arguments) > 8000 {
+			return false, "审批参数过长，请缩小单次动作以便人工核对"
+		}
+		actionID := engine.ActionID(ctx)
+		if actionID == "" || len(binding.Approvers) == 0 {
+			return false, "动作缺少审批身份或可用审批人"
+		}
+		target, err := makeApprovalTarget(ctx, chatID, actorID, binding.WorkDir, actionID, call)
+		if err != nil {
+			return false, err.Error()
+		}
+		err = m.wait(ctx, target, binding.Approvers, func(notifyCtx context.Context, id string, expiry time.Time) error {
+			message := fmt.Sprintf("需要审批 %s\n发起人 %s\n动作 %s · %s\n对象 %s\n当前版本 %s\n预期版本 %s\n参数摘要 %x\n执行参数\n%s\n剩余有效期 %s\n回复 approve %s 或 reject %s",
+				id, actorID, actionID, target.Tool, target.Path, target.Before, target.After, target.Digest, call.Arguments,
+				time.Until(expiry).Round(time.Second), id, id)
+			return send(notifyCtx, chatID, message)
+		})
+		if err != nil {
+			return false, err.Error()
+		}
+		current, err := makeApprovalTarget(ctx, chatID, actorID, binding.WorkDir, actionID, call)
+		if err != nil || target != current {
+			return false, "审批后动作参数或对象版本已变化，请重新审批"
+		}
+		return true, ""
+	}
+}
 
-    // 针对 bash 的高危模式匹配
-    if toolName == "bash" {
-        // 危险指令特征库 (模拟真实的运维黑名单)
-        dangerousPatterns := []string{
-            `rm\s+-r`,          // 级联删除
-            `sudo\s+`,          // 提权操作
-            `drop\s+`,          // 数据库危险命令
-            `>.*\.go`,          // 恶意覆盖源代码
-            `nginx\s+-s`,       // 【针对第 22 讲剧本】：拦截 Nginx 服务重启或停止
-            `systemctl\s+`,     // 拦截系统级服务管理
-            `kill\s+`,          // 拦截杀进程操作
-        }
-
-        for _, p := range dangerousPatterns {
-            if matched, _ := regexp.MatchString(p, args); matched {
-                return true // 命中任何一条黑名单，必须挂起审批
-            }
-        }
-    }
-
-    // 如果没有命中高危特征，默认放行 (例如简单的 ls -la, tail -n 50 等探测命令)
-    return false
+func makeApprovalTarget(ctx context.Context, chatID, actorID, workDir, actionID string, call schema.ToolCall) (approvalTarget, error) {
+	result := approvalTarget{ChatID: chatID, ActorID: actorID, ActionID: actionID, Tool: call.Name}
+	switch call.Name {
+	case "write_file", "edit_file":
+		preview, err := tools.PreviewWrite(ctx, call)
+		if err != nil {
+			return result, err
+		}
+		result.Path, result.Before, result.After = preview.Path, preview.Before, preview.After
+	case "bash":
+		version, err := engine.WorkspaceVersion(ctx, workDir)
+		if err != nil {
+			return result, fmt.Errorf("无法核对命令的工作区版本: %w", err)
+		}
+		result.Path, result.Before, result.After = workDir, version, "由执行结果确认"
+	default:
+		return result, fmt.Errorf("工具 %s 未配置飞书审批规则", call.Name)
+	}
+	material, err := json.Marshal(struct {
+		Target approvalTarget
+		Args   json.RawMessage
+	}{result, call.Arguments})
+	if err != nil {
+		return result, fmt.Errorf("无法生成动作摘要: %w", err)
+	}
+	result.Digest = sha256.Sum256(material)
+	return result, nil
 }

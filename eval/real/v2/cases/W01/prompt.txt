@@ -1,0 +1,1 @@
+独立飞书测试群更换授权发起人。只修改 agentops.config.json，将 oc_qa_group 群的 allowed_users 设置为仅含 ou_qa_new_operator。保留审批人、工作区、验收命令及其他配置，完成后简短说明。

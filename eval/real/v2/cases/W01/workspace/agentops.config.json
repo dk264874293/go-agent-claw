@@ -1,0 +1,16 @@
+{
+  "event_ledger": "/qa/feishu/ledger",
+  "chats": {
+    "oc_qa_group": {
+      "work_dir": "/qa/feishu/workspace",
+      "allowed_users": [
+        "ou_qa_original"
+      ],
+      "approvers": [
+        "ou_qa_approver"
+      ],
+      "mode": "trusted",
+      "verify_command": "go test ./..."
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"allowed_paths":[],"required_reads":["evidence/launcher.jsonl","evidence/signal-events.jsonl","evidence/deadline-events.jsonl","evidence/verification-started.txt"]}

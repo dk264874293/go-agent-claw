@@ -6,47 +6,49 @@ import (
     "encoding/json"
     "fmt"
     "os"
+    "strings"
 
     "github.com/openai/openai-go/v3"
-    "github.com/openai/openai-go/v3/option"
+    "github.com/openai/openai-go/v3/responses"
     "github.com/openai/openai-go/v3/shared"
     "github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
+const DefaultOpenAIModel = "gpt-6.1-terra"
+
 type OpenAIProvider struct {
-    client openai.Client // 值类型，非指针
+    chat openai.ChatCompletionService
+    responses responses.ResponseService
     model  string
 }
 
-// NewOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向数云 AI 网关
+// NewOpenAIProvider 构造函数：基于 OpenAI V3 SDK，默认使用 OpenAI 官方 API
 func NewOpenAIProvider(model string) *OpenAIProvider {
     apiKey := os.Getenv("OPENAI_API_KEY")
     if apiKey == "" {
         panic("请设置 OPENAI_API_KEY 环境变量")
     }
-    // 注意：必须带 /v1 前缀。网关根路径是 Web 控制台，未知路由会返回 HTML 首页（HTTP 200），
-    // 导致 SDK 按 JSON 反序列化时抛出 content-type 'text/html' 错误
-    baseURL := "https://syaiapihub.shuyun.cn/v1/"
-
-    return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-        model:  model,
+    // 自定义兼容端点时，URL 应包含其 API 版本路径。
+    baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+    if baseURL == "" {
+        baseURL = "https://api.openai.com/v1/"
     }
+
+    return newCompatibleProvider(model, apiKey, baseURL)
 }
 
-// NewDeepseekOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
+// NewDeepseekOpenAIProvider 构造函数：基于 OpenAI V3 SDK，使用 DeepSeek 兼容端点
 func NewDeepseekOpenAIProvider(model string) *OpenAIProvider {
     apiKey := os.Getenv("DEEPSEEK_API_KEY")
     if apiKey == "" {
         panic("请设置 DEEPSEEK_API_KEY 环境变量")
     }
-    // 核心：将官方 SDK 的地址替换为智谱的兼容端点
-    baseURL := "https://api.deepseek.com"
-
-    return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-        model:  model,
+    baseURL := strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL"))
+    if baseURL == "" {
+        baseURL = "https://api.deepseek.com"
     }
+
+    return newCompatibleProvider(model, apiKey, baseURL)
 }
 
 // NewZhipuOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
@@ -55,16 +57,18 @@ func NewZhipuOpenAIProvider(model string) *OpenAIProvider {
     if apiKey == "" {
         panic("请设置 ZHIPU_API_KEY 环境变量")
     }
-    // 核心：将官方 SDK 的地址替换为智谱的兼容端点
-    baseURL := "https://open.bigmodel.cn/api/paas/v4/"
-    return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-        model:  model,
+    baseURL := strings.TrimSpace(os.Getenv("ZHIPU_BASE_URL"))
+    if baseURL == "" {
+        baseURL = "https://open.bigmodel.cn/api/paas/v4/"
     }
+    return newCompatibleProvider(model, apiKey, baseURL)
 }
 
-
 func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
+    if p.model == DefaultOpenAIModel || p.model == "gpt-6.1-sol" {
+        return p.generateResponses(ctx, msgs, availableTools)
+    }
+
     var openaiMsgs []openai.ChatCompletionMessageParamUnion
 
     // 1. 翻译上下文消息
@@ -149,9 +153,9 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
         params.Tools = openaiTools
     }
 
-    resp, err := p.client.Chat.Completions.New(ctx, params)
+    resp, err := p.chat.New(ctx, params)
     if err != nil {
-        return nil, fmt.Errorf("OpenAI/Zhipu API 请求失败: %w", err)
+        return nil, fmt.Errorf("兼容模型 API 请求失败: %w", err)
     }
     if len(resp.Choices) == 0 {
         return nil, fmt.Errorf("API 返回了空的 Choices")
@@ -165,7 +169,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
     }
 
     // 【新增】提取 Usage 信息
-    if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
+    if resp.JSON.Usage.Valid() && resp.Usage.JSON.PromptTokens.Valid() && resp.Usage.JSON.CompletionTokens.Valid() {
         resultMsg.Usage = &schema.Usage{
             PromptTokens:     int(resp.Usage.PromptTokens),
             CompletionTokens: int(resp.Usage.CompletionTokens),
