@@ -60,7 +60,7 @@ func testOpenAIResponsesToolRoundTrip(t *testing.T, model string) {
 			t.Errorf("工具数为 %d，预期 2", len(body.Tools))
 		} else {
 			assertResponsesJSON(t, body.Tools[0], `{"type":"function","name":"read_file","description":"读取文件","strict":false,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["path"]}}`)
-			assertResponsesJSON(t, body.Tools[1], `{"type":"function","name":"list_dir","description":"列出工作区目录的直接子项。","strict":false,"parameters":{"type":"object","properties":{"path":{"type":"string","description":"工作区相对路径，默认 ."}},"additionalProperties":false}}`)
+			assertResponsesJSON(t, body.Tools[1], `{"type":"function","name":"list_dir","description":"列出工作区目录的直接子项；仅对目录调用，带 / 后缀的是目录，文件不能继续列目录。","strict":false,"parameters":{"type":"object","properties":{"path":{"type":"string","description":"工作区相对路径，默认 ."}},"additionalProperties":false}}`)
 		}
 
 		expected := []string{

@@ -11,3 +11,5 @@
 .zcode
 
 .go-cache/
+
+internal/engine/testdata

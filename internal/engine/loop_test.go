@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestRunStopsAtModelAndToolBudgets(t *testing.T) {
 		wantModels, wantIO int
 	}{
 		{name: "模型额度", models: 3, tools: 10, perTurn: 1, wantModels: 3, wantIO: 3},
-		{name: "并行工具额度", models: 10, tools: 2, perTurn: 4, wantModels: 1, wantIO: 2},
+		{name: "并行工具额度", models: 10, tools: 2, perTurn: 4, wantModels: 2, wantIO: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -107,13 +108,16 @@ func TestRunStopsAtModelAndToolBudgets(t *testing.T) {
 
 func TestRunRetainsGoalAfterWorkingMemorySlides(t *testing.T) {
 	dir := t.TempDir()
-	writeFixture(t, dir, "source.txt", "内容")
+	// 用不同文件形成真实的长读取历史，避免通过无目的重复读取触发效率策略。
+	for i := 1; i < 13; i++ {
+		writeFixture(t, dir, fmt.Sprintf("source-%d.txt", i), "内容")
+	}
 	const goal = "原始任务锚点 42：只读并核对指定文件"
 	calls := 0
 	provider := scriptedProvider(func(_ context.Context, messages []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
 		calls++
 		if calls < 13 {
-			return modelCalls(readCall(strconv.Itoa(calls), "source.txt"))
+			return modelCalls(readCall(strconv.Itoa(calls), fmt.Sprintf("source-%d.txt", calls)))
 		}
 		if !strings.Contains(messages[0].Content, goal) {
 			t.Fatalf("滑动窗口后系统上下文丢失目标: %q", messages[0].Content)

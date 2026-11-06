@@ -1,10 +1,9 @@
 package tools
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -19,7 +18,7 @@ func NewListDirTool(workDir string) *ListDirTool { return &ListDirTool{workDir: 
 func (t *ListDirTool) Name() string              { return "list_dir" }
 
 func (t *ListDirTool) Definition() schema.ToolDefinition {
-	return definition(t.Name(), "列出工作区目录的直接子项。", map[string]any{
+	return definition(t.Name(), "列出工作区目录的直接子项；仅对目录调用，带 / 后缀的是目录，文件不能继续列目录。", map[string]any{
 		"path": stringParam("工作区相对路径，默认 ."),
 	})
 }
@@ -53,11 +52,18 @@ func (t *ListDirTool) Execute(ctx context.Context, args json.RawMessage) (string
 	defer root.Close()
 	resolved, err := resolveReadPath(ctx, root, path, true)
 	if err != nil {
-		return "", err
+		return "", directoryReadError(path, err)
+	}
+	isDirectory, err := directoryInfo(ctx, root, resolved)
+	if err != nil {
+		return "", directoryReadError(path, err)
+	}
+	if !isDirectory {
+		return "", rejectPathNotDirectory(path)
 	}
 	entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(resolved))
 	if err != nil {
-		return "", rootError(err)
+		return "", directoryReadError(path, err)
 	}
 	if err := checkPathLinks(root, resolved, false); err != nil {
 		return "", err
@@ -94,17 +100,19 @@ func NewSearchTextTool(workDir string) *SearchTextTool { return &SearchTextTool{
 func (t *SearchTextTool) Name() string                 { return "search_text" }
 
 func (t *SearchTextTool) Definition() schema.ToolDefinition {
-	return definition(t.Name(), "在工作区内按字面文本搜索，返回相对路径、行号和匹配片段。", map[string]any{
-		"path":  stringParam("文件或目录的相对路径，默认 ."),
-		"query": stringParam("要匹配的文本，区分大小写"),
-		"limit": intParam("最多返回的匹配数，默认 30", 1, 100),
+	return definition(t.Name(), "在工作区文本正文中按字面搜索，返回相对路径、行号和匹配片段；按文件名发现文件请用 find_files。自动跳过二进制及不支持的编码。", map[string]any{
+		"path":      stringParam("文件或目录的相对路径，默认 ."),
+		"query":     stringParam("要匹配的文本，区分大小写"),
+		"limit":     intParam("最多返回的匹配数，默认 30", 1, 100),
+		"name_glob": nameGlobParam("可选文件基本名过滤，例如 *.md；缺省不过滤，不支持目录分隔符或 **"),
 	}, "query")
 }
 
 type searchTextArgs struct {
-	Path  string `json:"path"`
-	Query string `json:"query"`
-	Limit int    `json:"limit"`
+	Path     string  `json:"path"`
+	Query    string  `json:"query"`
+	Limit    int     `json:"limit"`
+	NameGlob *string `json:"name_glob"`
 }
 
 func parseSearch(ctx context.Context, args json.RawMessage) (input searchTextArgs, err error) {
@@ -118,6 +126,11 @@ func parseSearch(ctx context.Context, args json.RawMessage) (input searchTextArg
 	}
 	if input.Query == "" || strings.ContainsAny(input.Query, "\r\n") || input.Limit < 1 || input.Limit > 100 {
 		return input, reject("参数错误", fmt.Errorf("query 必须是非空单行文本，limit 必须在 1 至 100 之间"))
+	}
+	if input.NameGlob != nil {
+		if err := validateNameGlob(*input.NameGlob); err != nil {
+			return input, err
+		}
 	}
 	return input, nil
 }
@@ -142,7 +155,8 @@ func (t *SearchTextTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", err
 	}
 	scope := ScopeFromContext(ctx)
-	matches, files, skipped := 0, 0, 0
+	matches, files := 0, 0
+	var skipped searchSkipCounts
 	var out strings.Builder
 	err = fs.WalkDir(root.FS(), filepath.ToSlash(resolved), func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -152,7 +166,7 @@ func (t *SearchTextTool) Execute(ctx context.Context, args json.RawMessage) (str
 			if path == resolved {
 				return walkErr
 			}
-			skipped++
+			skipped.unreadable++
 			return nil
 		}
 		if protectedRuntimePath(path) || !scope.allowsPath(path, entry.IsDir()) {
@@ -171,48 +185,54 @@ func (t *SearchTextTool) Execute(ctx context.Context, args json.RawMessage) (str
 		if !entry.Type().IsRegular() {
 			return nil
 		}
+		if input.NameGlob != nil && !matchesNameGlob(*input.NameGlob, entry.Name()) {
+			return nil
+		}
 		if files == 2000 {
 			return fs.SkipAll
 		}
 		files++
-		file, info, err := openRegular(ctx, root, path)
+		data, reason, err := readSearchText(ctx, root, path)
 		if err != nil {
-			skipped++
+			return err
+		}
+		if reason != "" {
+			skipped.add(reason)
 			return nil
 		}
-		defer file.Close()
-		if info.Size() > 4*1024*1024 {
-			skipped++
-			return nil
-		}
-		scanner := bufio.NewScanner(contextReader{ctx, file})
-		scanner.Buffer(make([]byte, 4096), 256*1024)
-		for line := 1; scanner.Scan(); line++ {
-			text := scanner.Text()
-			index := strings.Index(text, input.Query)
-			if index < 0 || strings.ContainsRune(text, 0) {
+		// 整份有界内容已确认编码，逐行切片不再制造采样或显示边界的乱码。
+		for offset, line := 0, 1; offset < len(data); line++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			end := bytes.IndexByte(data[offset:], '\n')
+			next := len(data)
+			if end < 0 {
+				end = len(data)
+			} else {
+				end += offset
+				next = end + 1
+			}
+			lineBytes := data[offset:end]
+			offset = next
+			if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\r' {
+				lineBytes = lineBytes[:len(lineBytes)-1]
+			}
+			if len(lineBytes) > maxSearchLineBytes {
+				skipped.longLines++
 				continue
 			}
-			start := max(0, index-150)
-			end := min(len(text), start+400)
-			snippet := strings.ToValidUTF8(text[start:end], "�")
-			if start > 0 {
-				snippet = "…" + snippet
+			text := string(lineBytes)
+			index := strings.Index(text, input.Query)
+			if index < 0 {
+				continue
 			}
-			if end < len(text) {
-				snippet += "…"
-			}
+			snippet := searchSnippet(text, index)
 			fmt.Fprintf(&out, "%s:%d: %s\n", path, line, snippet)
 			matches++
 			if matches == input.Limit {
 				return fs.SkipAll
 			}
-		}
-		if err := scanner.Err(); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			skipped++
 		}
 		return nil
 	})
@@ -225,8 +245,6 @@ func (t *SearchTextTool) Execute(ctx context.Context, args json.RawMessage) (str
 	if matches == input.Limit || files == 2000 {
 		out.WriteString("已达到搜索上限，可缩小范围后继续。\n")
 	}
-	if skipped > 0 {
-		fmt.Fprintf(&out, "跳过 %d 个过大或无法读取的文件。\n", skipped)
-	}
+	fmt.Fprintf(&out, "扫描统计（本次已检查范围）：二进制 %d，不支持编码 %d，过大 %d，不可读 %d，超长行 %d。\n", skipped.binary, skipped.encoding, skipped.tooLarge, skipped.unreadable, skipped.longLines)
 	return out.String(), nil
 }

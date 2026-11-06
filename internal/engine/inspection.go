@@ -19,6 +19,9 @@ type Inspection struct {
 	Delivery     *Delivery
 	Verification *Verification
 	Result       *RunResult
+	Analysis     *AnalysisState
+	Reading      *ReadingCoverage
+	Delegation   *DelegationState
 	Action       *InspectionAction
 	Running      bool
 	Sequence     uint64
@@ -55,6 +58,15 @@ func (v *Inspection) Apply(event taskstore.Event) error {
 	if json.Unmarshal(event.Payload, &s) != nil || s.Version != 1 {
 		return fmt.Errorf("任务状态版本或内容无效")
 	}
+	if err := validateReadonlyState(s); err != nil {
+		return fmt.Errorf("任务只读停止状态无效: %w", err)
+	}
+	if err := validateAnalysisState(s); err != nil {
+		return fmt.Errorf("任务分析状态无效: %w", err)
+	}
+	if err := ValidateDelegationState(s); err != nil {
+		return fmt.Errorf("任务委派状态无效: %w", err)
+	}
 	if event.Kind == "started" {
 		v.Running = true
 		v.Result = nil
@@ -67,6 +79,8 @@ func (v *Inspection) Apply(event taskstore.Event) error {
 	v.Pending = len(s.Pending)
 	v.Delivery = deliveryFromState(s)
 	v.Verification = s.Verification
+	v.Analysis = s.Analysis
+	v.Reading, v.Delegation = s.Reading, s.Delegation
 	v.Plan = nil
 	for _, p := range s.Plan {
 		v.Plan = append(v.Plan, InspectionStep{p.ID, p.Goal, p.DependsOn, p.Done})
@@ -88,6 +102,15 @@ func ValidateInspectionSnapshot(raw []byte) error {
 	var state taskState
 	if json.Unmarshal(s.State, &state) != nil || state.Version != 1 {
 		return fmt.Errorf("任务快照状态无效")
+	}
+	if err := validateReadonlyState(state); err != nil {
+		return fmt.Errorf("任务快照的只读停止状态无效: %w", err)
+	}
+	if err := validateAnalysisState(state); err != nil {
+		return fmt.Errorf("任务快照的分析状态无效: %w", err)
+	}
+	if err := ValidateDelegationState(state); err != nil {
+		return err
 	}
 	return nil
 }

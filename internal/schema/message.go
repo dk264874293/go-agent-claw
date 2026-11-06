@@ -36,6 +36,10 @@ type Message struct {
 	// 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolStatus ToolStatus `json:"tool_status,omitempty"`
+	// ReadEvidenceID 是引擎绑定的观察身份，不发送给 Provider；不能按可能复用的 ToolCallID 猜测来源。
+	ReadEvidenceID string `json:"-"`
+	// ReadActionID 在普通读取与分析读取间统一定位观察，避免跨轮复用 ToolCallID 串联来源。
+	ReadActionID string `json:"-"`
 	//是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
 	Usage *Usage `json:"usage,omitempty"`
 }
@@ -67,13 +71,56 @@ const (
 
 // ToolResult 分别记录工具执行状态和效果是否已知。
 type ToolResult struct {
-	ToolCallID string       `json:"tool_call_id"`
-	Output     string       `json:"output"`
-	Status     ToolStatus   `json:"status"`
-	Effect     EffectStatus `json:"effect"`
-	ErrorKind  string       `json:"error_kind,omitempty"`
-	ExitCode   *int         `json:"exit_code,omitempty"`
-	IsError    bool         `json:"is_error"`
+	ToolCallID string            `json:"tool_call_id"`
+	Output     string            `json:"output"`
+	Status     ToolStatus        `json:"status"`
+	Effect     EffectStatus      `json:"effect"`
+	ErrorKind  string            `json:"error_kind,omitempty"`
+	ErrorCode  string            `json:"error_code,omitempty"`
+	Retryable  *bool             `json:"retryable,omitempty"`
+	ExitCode   *int              `json:"exit_code,omitempty"`
+	IsError    bool              `json:"is_error"`
+	Read       *ReadReceipt      `json:"read,omitempty"`
+	Discovery  *DiscoveryReceipt `json:"discovery,omitempty"`
+	// ReadContent 只在执行进程内传递实际交付的源字节，由引擎按需保存为不可变证据。
+	ReadContent []byte `json:"-"`
+}
+
+// ReadReceipt 记录一次成功读取实际交付的源码范围，不证明文件当前仍是该版本。
+type ReadReceipt struct {
+	Path       string      `json:"path"`
+	Version    string      `json:"version"`
+	ByteStart  int64       `json:"byte_start"`
+	ByteEnd    int64       `json:"byte_end"`
+	FirstLine  int         `json:"first_line"`
+	LastLine   int         `json:"last_line"`
+	TotalBytes int64       `json:"total_bytes"`
+	AgentID    string      `json:"agent_id,omitempty"`
+	ActionID   string      `json:"action_id,omitempty"`
+	EvidenceID string      `json:"evidence_id,omitempty"`
+	ArtifactID string      `json:"artifact_id,omitempty"`
+	Review     *ReadReview `json:"review,omitempty"`
+}
+
+// ReadReview 只描述复核目标；引擎校验目标是否属于当前任务及是否仍可用。
+type ReadReview struct {
+	TargetID string `json:"target_id"`
+	Question string `json:"question"`
+}
+
+// DiscoveryReceipt 仅记录本次有界发现清单及当时的文件大小，不证明版本或读取完成。
+type DiscoveryReceipt struct {
+	ManifestID string           `json:"manifest_id"`
+	Path       string           `json:"path"`
+	NameGlob   string           `json:"name_glob"`
+	Files      []DiscoveredFile `json:"files"`
+	Truncated  bool             `json:"truncated"`
+	Unreadable int              `json:"unreadable"`
+}
+
+type DiscoveredFile struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
 }
 
 func NewToolResult(id, output string, status ToolStatus, effect EffectStatus, errorKind string, exitCode *int) ToolResult {

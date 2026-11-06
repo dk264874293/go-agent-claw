@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +23,109 @@ func runTestTool(ctx context.Context, r Registry, name string, args map[string]a
 		panic(err)
 	}
 	return r.Execute(ctx, schema.ToolCall{ID: "调用", Name: name, Arguments: data})
+}
+
+type registryErrorTool struct {
+	name string
+	run  func(context.Context) error
+}
+
+func (t registryErrorTool) Name() string { return t.name }
+func (t registryErrorTool) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{Name: t.name}
+}
+func (t registryErrorTool) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
+	return "保留的工具输出", t.run(ctx)
+}
+
+type registryRequestTimeout struct{}
+
+func (registryRequestTimeout) Error() string   { return "请求超时" }
+func (registryRequestTimeout) Timeout() bool   { return true }
+func (registryRequestTimeout) Temporary() bool { return true }
+
+func TestRegistryRequestTimeoutDoesNotCancelTool(t *testing.T) {
+	dialTimeout := &url.Error{Op: "Post", URL: "https://example.invalid", Err: &net.OpError{
+		Op: "dial", Net: "tcp", Err: fmt.Errorf("连接失败: %w", context.DeadlineExceeded),
+	}}
+	for _, tc := range []struct {
+		name, tool string
+		err        error
+		kind       string
+		effect     schema.EffectStatus
+	}{
+		{name: "子任务连接超时", tool: "spawn_subagent", err: dialTimeout, kind: "超时", effect: schema.EffectNone},
+		{name: "只读请求超时", tool: "read_file", err: context.DeadlineExceeded, kind: "超时", effect: schema.EffectNone},
+		{name: "网络超时独立类型", tool: "timeout_fixture", err: registryRequestTimeout{}, kind: "超时", effect: schema.EffectUnknown},
+		{name: "局部请求取消", tool: "spawn_subagent", err: context.Canceled, kind: "执行失败", effect: schema.EffectNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := WithScope(context.Background(), ExecutionScope{Mode: ModeTrusted})
+			registry := NewRegistry()
+			registry.Register(registryErrorTool{name: tc.tool, run: func(context.Context) error { return tc.err }})
+			result := runTestTool(ctx, registry, tc.tool, map[string]any{})
+			if result.Status != schema.ToolFailed || result.Effect != tc.effect || result.ErrorKind != tc.kind || !result.IsError {
+				t.Fatalf("请求错误分类不符: %+v", result)
+			}
+			if ctx.Err() != nil || !strings.Contains(result.Output, "保留的工具输出") {
+				t.Fatalf("请求错误改变执行上下文或丢失输出: %+v", result)
+			}
+		})
+	}
+}
+
+func TestRegistryExecutionContextCancellation(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+			parent := WithScope(context.Background(), ExecutionScope{Mode: ModeTrusted})
+			var ctx context.Context
+			var cancel context.CancelFunc
+			wantKind := "取消"
+			if deadline {
+				ctx, cancel = context.WithTimeout(parent, 20*time.Millisecond)
+				wantKind = "超时"
+			} else {
+				ctx, cancel = context.WithCancel(parent)
+			}
+			defer cancel()
+			registry := NewRegistry()
+			registry.Register(registryErrorTool{name: "timeout_fixture", run: func(executionCtx context.Context) error {
+				if !deadline {
+					cancel()
+				}
+				<-executionCtx.Done()
+				return executionCtx.Err()
+			}})
+			result := runTestTool(ctx, registry, "timeout_fixture", map[string]any{})
+			if result.Status != schema.ToolCancelled || result.Effect != schema.EffectUnknown || result.ErrorKind != wantKind {
+				t.Fatalf("执行上下文结束分类不符: %+v", result)
+			}
+		})
+	}
+}
+
+func TestRegistryExplicitExecutionErrorKeepsPriority(t *testing.T) {
+	ctx, cancel := context.WithCancel(WithScope(context.Background(), ExecutionScope{Mode: ModeTrusted}))
+	defer cancel()
+	registry := NewRegistry()
+	registry.Register(registryErrorTool{name: "timeout_fixture", run: func(context.Context) error {
+		cancel()
+		return reject("参数错误", context.DeadlineExceeded)
+	}})
+	result := runTestTool(ctx, registry, "timeout_fixture", map[string]any{})
+	if result.Status != schema.ToolRejected || result.Effect != schema.EffectNone || result.ErrorKind != "参数错误" {
+		t.Fatalf("结构化拒绝被上下文错误覆盖: %+v", result)
+	}
+
+	// Bash 的独立执行时限已由其结构化回执确认，父上下文仍可继续使用。
+	live := WithScope(context.Background(), ExecutionScope{Mode: ModeTrusted})
+	registry.Register(registryErrorTool{name: "bash", run: func(context.Context) error {
+		return bashCancellation(context.DeadlineExceeded, schema.EffectUnknown)
+	}})
+	result = runTestTool(live, registry, "bash", map[string]any{})
+	if result.Status != schema.ToolCancelled || result.Effect != schema.EffectUnknown || result.ErrorKind != "超时" || live.Err() != nil {
+		t.Fatalf("已确认的命令超时回执被覆盖: %+v", result)
+	}
 }
 
 func TestRegistryRejectsHiddenToolsAndInvalidArgsBeforeMiddleware(t *testing.T) {

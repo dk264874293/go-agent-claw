@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"net"
 
 	"github.com/dk264874293/go-agent-claw/internal/observe"
 )
@@ -35,15 +36,16 @@ func (e *AgentEngine) ObservationOptions(workDir, entry string, spec TaskSpec) o
 }
 
 func observationError(err error) string {
+	var networkError net.Error
 	switch {
 	case err == nil:
 		return ""
-	case errors.Is(err, context.Canceled):
-		return "cancelled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
 	case errors.Is(err, errStorage):
 		return "storage_error"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &networkError) && networkError.Timeout():
+		return "timeout"
 	case errors.Is(err, errBudget):
 		return "budget_exhausted"
 	default:

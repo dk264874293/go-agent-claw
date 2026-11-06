@@ -63,11 +63,12 @@ type Usage struct {
 }
 
 type EngineOptions struct {
-	Mode            tools.Mode
-	EnableThinking  bool
-	Plan            bool
-	Budget          Budget
-	MaxContextBytes int
+	Mode                 tools.Mode
+	EnableThinking       bool
+	Plan                 bool
+	Budget               Budget
+	MaxContextBytes      int
+	AnalysisContextBytes int // 分析请求软目标；零值为 96 KiB，不覆盖硬上限。
 }
 
 // TaskSpec 由调用方提供。恢复时读取原目标、验收命令和规划设置。
@@ -78,6 +79,8 @@ type TaskSpec struct {
 	Mode          tools.Mode `json:"mode"`
 	VerifyCommand string     `json:"verify_command,omitempty"`
 	Plan          bool       `json:"plan"`
+	Analysis      bool       `json:"analysis,omitempty"`
+	Delegation    string     `json:"delegation,omitempty"`
 	Resume        bool       `json:"-"`
 }
 
@@ -107,16 +110,26 @@ type FileEffect struct {
 	AfterVersion  string `json:"after_version"`
 }
 
+// PartialReport 仅交付停止时的部分分析，不代表任务完成或通过验收。
+type PartialReport struct {
+	Text        string `json:"text"`
+	Source      string `json:"source"`
+	OriginRunID string `json:"origin_run_id"`
+}
+
 type RunResult struct {
-	TaskID       string        `json:"task_id"`
-	RunID        string        `json:"run_id"`
-	Status       TaskStatus    `json:"status"`
-	StopCode     string        `json:"stop_code,omitempty"`
-	Reason       string        `json:"reason"`
-	FinalText    string        `json:"final_text,omitempty"`
-	Delivery     *Delivery     `json:"delivery,omitempty"`
-	Verification *Verification `json:"verification,omitempty"`
-	Usage        Usage         `json:"usage"`
+	TaskID        string           `json:"task_id"`
+	RunID         string           `json:"run_id"`
+	Status        TaskStatus       `json:"status"`
+	StopCode      string           `json:"stop_code,omitempty"`
+	Reason        string           `json:"reason"`
+	FinalText     string           `json:"final_text,omitempty"`
+	PartialReport *PartialReport   `json:"partial_report,omitempty"`
+	Analysis      *AnalysisReport  `json:"analysis,omitempty"`
+	Reading       *ReadingCoverage `json:"reading,omitempty"`
+	Delivery      *Delivery        `json:"delivery,omitempty"`
+	Verification  *Verification    `json:"verification,omitempty"`
+	Usage         Usage            `json:"usage"`
 }
 
 func (r RunResult) ExitCode() int {

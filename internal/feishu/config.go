@@ -26,6 +26,8 @@ type ChatBinding struct {
 	Approvers     []string   `json:"approvers"`
 	Mode          tools.Mode `json:"mode"`
 	VerifyCommand string     `json:"verify_command,omitempty"`
+	Analysis      bool       `json:"analysis,omitempty"`
+	Delegation    string     `json:"delegation,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -91,6 +93,15 @@ func (c *Config) validate() error {
 		}
 		if binding.VerifyCommand != "" && binding.Mode != tools.ModeTrusted {
 			return fmt.Errorf("群聊 %q 的验收命令需要可信本机模式", id)
+		}
+		if binding.Analysis && (binding.Mode != tools.ModeReadOnly || binding.VerifyCommand != "") {
+			return fmt.Errorf("群聊 %q 的分析模式仅支持只读模式且不能设置验收命令", id)
+		}
+		if binding.Delegation != "" && (binding.Delegation != "auto" && binding.Delegation != "off" && binding.Delegation != "on" || binding.Mode != tools.ModeReadOnly || binding.VerifyCommand != "") {
+			return fmt.Errorf("群聊 %q 的委派策略必须是只读回答模式下的 auto、off 或 on", id)
+		}
+		if binding.Mode == tools.ModeReadOnly && binding.Delegation == "" {
+			binding.Delegation = "auto"
 		}
 		c.Chats[id] = binding
 	}

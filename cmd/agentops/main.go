@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,14 +16,19 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/feishu"
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
+	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
-	"github.com/joho/godotenv"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
 )
 
 func main() {
-	_ = godotenv.Overload()
+	if err := runtimeenv.LoadDotenv(true); err != nil {
+		log.Fatal(err)
+	}
+	if err := runtimeenv.ApplyDefaults(); err != nil {
+		log.Fatal(err)
+	}
 	if err := serve(); err != nil {
 		log.Fatal(err)
 	}
@@ -31,8 +37,12 @@ func main() {
 func serve() error {
 	appID, secret := os.Getenv("FEISHU_APP_ID"), os.Getenv("FEISHU_APP_SECRET")
 	verifyToken, encryptKey := os.Getenv("FEISHU_VERIFY_TOKEN"), os.Getenv("FEISHU_ENCRYPT_KEY")
-	if appID == "" || secret == "" || verifyToken == "" || encryptKey == "" || os.Getenv("OPENAI_API_KEY") == "" {
-		return errors.New("请设置 FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_VERIFY_TOKEN、FEISHU_ENCRYPT_KEY 和 OPENAI_API_KEY")
+	if appID == "" || secret == "" || verifyToken == "" || encryptKey == "" {
+		return errors.New("请设置 FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_VERIFY_TOKEN 和 FEISHU_ENCRYPT_KEY")
+	}
+	model, llm, err := configuredModelProvider()
+	if err != nil {
+		return err
 	}
 	configPath := os.Getenv("FEISHU_AGENTOPS_CONFIG")
 	if configPath == "" {
@@ -45,9 +55,7 @@ func serve() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	const model = provider.DefaultOpenAIModel
 	client := lark.NewClient(appID, secret, lark.WithReqTimeout(8*time.Second))
-	llm := provider.NewOpenAIProvider(model)
 	bot, err := feishu.NewFeishuBot(ctx, config, client, func(ctx context.Context, session *ctxpkg.Session, spec engine.TaskSpec, reporter engine.Reporter, admit tools.MiddlewareFunc) (engine.RunResult, error) {
 		registry := engine.NewWorkspaceRegistry(session.WorkDir)
 		registry.Use(admit)
@@ -83,4 +91,13 @@ func serve() error {
 		return nil
 	}
 	return err
+}
+
+func configuredModelProvider() (string, provider.LLMProvider, error) {
+	channel, model, err := provider.ResolveModelConfig(os.Getenv("CLAW_PROVIDER"), os.Getenv("CLAW_MODEL"))
+	if err != nil {
+		return model, nil, fmt.Errorf("请检查 CLAW_PROVIDER 和 CLAW_MODEL: %w", err)
+	}
+	llm, err := provider.NewConfiguredProvider(channel, model)
+	return model, llm, err
 }

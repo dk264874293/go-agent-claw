@@ -68,7 +68,7 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 		tools = append(tools, responses.ToolUnionParam{OfFunction: function})
 	}
 
-	resp, err := p.client.Responses.New(ctx, responses.ResponseNewParams{
+	resp, err := p.responses.New(ctx, responses.ResponseNewParams{
 		Model:   shared.ResponsesModel(p.model),
 		Input:   responses.ResponseNewParamsInputUnion{OfInputItemList: input},
 		Tools:   tools,

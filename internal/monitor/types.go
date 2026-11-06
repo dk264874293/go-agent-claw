@@ -112,6 +112,7 @@ type Task struct {
 	Activity        string                  `json:"activity"`
 	EngineStatus    string                  `json:"engine_status"`
 	StopCode        string                  `json:"stop_code,omitempty"`
+	ResultRunID     string                  `json:"result_run_id,omitempty"`
 	RecordQuality   string                  `json:"record_quality"`
 	LastObservedAt  *time.Time              `json:"last_observed_at,omitempty"`
 	Budget          Budget                  `json:"budget"`
@@ -121,6 +122,11 @@ type Task struct {
 	HistoryComplete bool                    `json:"history_complete"`
 	Verification    *engine.Verification    `json:"verification,omitempty"`
 	FinalText       string                  `json:"final_text"`
+	PartialReport   *engine.PartialReport   `json:"partial_report,omitempty"`
+	Analysis        *engine.AnalysisReport  `json:"analysis,omitempty"`
+	AnalysisEnabled bool                    `json:"analysis_enabled"`
+	Delegation      string                  `json:"delegation,omitempty"`
+	Reading         *engine.ReadingCoverage `json:"reading,omitempty"`
 	Alerts          []Alert                 `json:"alerts"`
 	Plan            []engine.InspectionStep `json:"plan"`
 	Evidence        []Evidence              `json:"evidence"`

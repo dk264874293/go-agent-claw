@@ -219,6 +219,29 @@ func (x *Index) Refresh() bool {
 					p["status"] = act.Result.Status
 					p["effect"] = act.Result.Effect
 					p["summary"] = clip(observe.Redact(act.Result.Output), 800)
+					if act.Tool == "spawn_subagent" {
+						var result struct {
+							Handoff *struct {
+								ReportID     string `json:"report_id"`
+								Execution    string `json:"execution"`
+								Citations    string `json:"citations"`
+								Verification string `json:"verification"`
+								Coverage     *struct {
+									Status string `json:"status"`
+								} `json:"coverage"`
+							} `json:"handoff"`
+						}
+						if json.Unmarshal([]byte(act.Result.Output), &result) == nil && result.Handoff != nil {
+							h := result.Handoff
+							p["report_id"] = observe.Redact(h.ReportID)
+							p["handoff_execution"] = observe.Redact(h.Execution)
+							p["handoff_citations"] = observe.Redact(h.Citations)
+							p["handoff_verification"] = observe.Redact(h.Verification)
+							if h.Coverage != nil {
+								p["handoff_coverage"] = observe.Redact(h.Coverage.Status)
+							}
+						}
+					}
 				}
 				oe := Event{SchemaVersion: 1, AttemptID: a.ID, Sequence: ev.Sequence, EventType: ev.Kind, TaskID: d.Name(), WorkspaceID: wid, SourceTaskSequence: ev.Sequence, Payload: p}
 				if s.view.Action != nil {
@@ -234,6 +257,8 @@ func (x *Index) Refresh() bool {
 			}
 			v := s.view
 			t := Task{ID: id, WorkspaceID: wid, TaskID: d.Name(), Goal: clip(observe.Redact(v.Spec.Goal), 4000), Mode: string(v.Spec.Mode), Kind: string(v.Spec.Kind), Activity: "unknown", RecordQuality: "historical_incomplete", Budget: Budget{v.Limits.MaxModelCalls, v.Limits.MaxToolCalls, v.Limits.MaxTurns, v.Limits.Timeout.Milliseconds()}, Usage: Usage{v.Usage.ModelCalls, v.Usage.ToolCalls, v.Usage.Turns, v.Usage.Elapsed.Milliseconds()}, Plan: append([]engine.InspectionStep(nil), v.Plan...), Attempts: append([]Attempt{}, s.attempts...), Effects: []engine.EffectReceipt{}, Alerts: []Alert{}, Evidence: []Evidence{}}
+			t.AnalysisEnabled = v.Spec.Analysis
+			t.Delegation = v.Spec.Delegation
 			for i := range t.Plan {
 				t.Plan[i].Goal = observe.Redact(t.Plan[i].Goal)
 			}
@@ -242,9 +267,50 @@ func (x *Index) Refresh() bool {
 				t.Effects = append(t.Effects, v.Delivery.Effects...)
 			}
 			if v.Result != nil {
+				if v.Result.Reading != nil {
+					raw, _ := json.Marshal(v.Result.Reading)
+					var reading engine.ReadingCoverage
+					if json.Unmarshal(raw, &reading) == nil {
+						for i := range reading.Files {
+							reading.Files[i].Path = observe.Redact(reading.Files[i].Path)
+						}
+						t.Reading = &reading
+					}
+				}
+				if v.Result.Analysis != nil {
+					raw, _ := json.Marshal(v.Result.Analysis)
+					var report engine.AnalysisReport
+					if json.Unmarshal(raw, &report) == nil {
+						for i := range report.Findings {
+							f := &report.Findings[i]
+							f.Statement = observe.Redact(f.Statement)
+							f.Context = observe.Redact(f.Context)
+							f.Limitations = observe.Redact(f.Limitations)
+							for j := range f.Evidence {
+								ref := &f.Evidence[j]
+								ref.Quote = observe.Redact(ref.Quote)
+								ref.Path = observe.Redact(ref.Path)
+							}
+						}
+						for i := range report.Unverified {
+							report.Unverified[i] = observe.Redact(report.Unverified[i])
+						}
+						for id, text := range report.Summaries {
+							report.Summaries[id] = observe.Redact(text)
+						}
+						t.Analysis = &report
+					}
+				}
 				t.EngineStatus = string(v.Result.Status)
 				t.StopCode = v.Result.StopCode
+				t.ResultRunID = v.Result.RunID
 				t.FinalText = observe.Redact(v.Result.FinalText)
+				if partial := v.Result.PartialReport; partial != nil {
+					copy := *partial
+					copy.Text = observe.Redact(copy.Text)
+					copy.OriginRunID = observe.Redact(copy.OriginRunID)
+					t.PartialReport = &copy
+				}
 				t.Activity = "result_recorded"
 			}
 			if v.Verification != nil {

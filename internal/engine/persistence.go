@@ -48,11 +48,18 @@ func (e *AgentEngine) openTask(store *taskstore.Store, workDir, sessionID string
 		if spec.Kind != TaskAnswer && spec.Kind != TaskChange {
 			return nil, taskState{}, errors.New("任务类型必须为 answer 或 change")
 		}
+		if spec.Analysis && (spec.Mode != tools.ModeReadOnly || spec.Kind != TaskAnswer || spec.VerifyCommand != "") {
+			return nil, taskState{}, errors.New("分析模式仅支持 readonly + answer，不能指定验收命令")
+		}
+		delegation, err := initializeDelegation(&spec)
+		if err != nil {
+			return nil, taskState{}, err
+		}
 		task, err := store.CreateTask(spec.ID)
 		if err != nil {
 			return nil, taskState{}, fmt.Errorf("%w：创建任务失败: %w", errStorage, err)
 		}
-		return task, taskState{Version: 1, Spec: spec, WorkDir: workDir, SessionID: sessionID, Limits: e.options.Budget.defaults(),
+		return task, taskState{Version: 1, Spec: spec, WorkDir: workDir, SessionID: sessionID, Limits: e.options.Budget.defaults(), Delegation: delegation,
 			EffectLedger: &Delivery{HistoryComplete: true, Effects: []EffectReceipt{}}}, nil
 	}
 	task, err := store.OpenTask(spec.ID)
@@ -90,6 +97,21 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return taskState{}, err
 	}
+	if len(snapshot.State) != 0 {
+		var checkpoint taskState
+		if err := json.Unmarshal(snapshot.State, &checkpoint); err != nil || checkpoint.Version != 1 {
+			return taskState{}, fmt.Errorf("任务检查点状态版本或内容无效")
+		}
+		if err := validateReadonlyState(checkpoint); err != nil {
+			return taskState{}, fmt.Errorf("任务检查点状态无效: %w", err)
+		}
+		if err := validateAnalysisState(checkpoint); err != nil {
+			return taskState{}, err
+		}
+		if err := ValidateDelegationState(checkpoint); err != nil {
+			return taskState{}, err
+		}
+	}
 	state := taskState{}
 	for _, event := range events {
 		if event.Kind == "elapsed" {
@@ -107,6 +129,15 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 		}
 		if next.Version != 1 {
 			return state, fmt.Errorf("不支持的任务版本 %d", next.Version)
+		}
+		if err := validateReadonlyState(next); err != nil {
+			return state, fmt.Errorf("任务事件 %d 的只读停止状态无效: %w", event.Sequence, err)
+		}
+		if err := validateAnalysisState(next); err != nil {
+			return state, fmt.Errorf("任务事件 %d 的分析状态无效: %w", event.Sequence, err)
+		}
+		if err := ValidateDelegationState(next); err != nil {
+			return state, fmt.Errorf("任务事件 %d 委派状态无效: %w", event.Sequence, err)
 		}
 		if event.Sequence >= snapshot.Sequence {
 			state = next

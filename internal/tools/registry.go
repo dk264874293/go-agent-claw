@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -96,11 +97,13 @@ func (r *registryImpl) VisibleTools(ctx context.Context) []schema.ToolDefinition
 }
 
 type executionError struct {
-	status   schema.ToolStatus
-	effect   schema.EffectStatus
-	kind     string
-	exitCode *int
-	err      error
+	status    schema.ToolStatus
+	effect    schema.EffectStatus
+	kind      string
+	code      string
+	retryable *bool
+	exitCode  *int
+	err       error
 }
 
 func (e *executionError) Error() string { return e.err.Error() }
@@ -139,6 +142,21 @@ type toolPreflight interface {
 
 type toolExecution interface {
 	execute(context.Context, json.RawMessage) (output string, exitCode *int, err error)
+}
+
+// toolReadExecution 的回执由读取实现产生，避免从面向模型的文本反推证据。
+type toolReadExecution interface {
+	executeRead(context.Context, json.RawMessage) (string, *schema.ReadReceipt, error)
+}
+
+// toolReadSourceExecution 在回执之外传递原始源字节，避免从编号正文反推证据。
+type toolReadSourceExecution interface {
+	executeReadSource(context.Context, json.RawMessage) (string, *schema.ReadReceipt, []byte, error)
+}
+
+// toolDiscoveryExecution 直接传递有界发现回执，不从面向模型的路径清单解析规模。
+type toolDiscoveryExecution interface {
+	executeDiscovery(context.Context, json.RawMessage) (string, *schema.DiscoveryReceipt, error)
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (result schema.ToolResult) {
@@ -193,7 +211,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	stage = "parameters"
 	if preflight, ok := tool.(toolPreflight); ok {
 		if err := preflight.validate(ctx, call.Arguments); err != nil {
-			return toolErrorResult(call, "", nil, err)
+			return toolErrorResult(ctx, call, "", nil, err)
 		}
 	}
 	stage = "middleware"
@@ -223,15 +241,24 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	observe.Emit(ctx, "tool_admission", admitted)
 	observe.Emit(ctx, "tool_handler_started", observationForTool(call))
 	var output string
+	var read *schema.ReadReceipt
+	var readContent []byte
+	var discovery *schema.DiscoveryReceipt
 	var exitCode *int
 	var err error
-	if executor, ok := tool.(toolExecution); ok {
+	if finder, ok := tool.(toolDiscoveryExecution); ok {
+		output, discovery, err = finder.executeDiscovery(ctx, call.Arguments)
+	} else if reader, ok := tool.(toolReadSourceExecution); ok {
+		output, read, readContent, err = reader.executeReadSource(ctx, call.Arguments)
+	} else if reader, ok := tool.(toolReadExecution); ok {
+		output, read, err = reader.executeRead(ctx, call.Arguments)
+	} else if executor, ok := tool.(toolExecution); ok {
 		output, exitCode, err = executor.execute(ctx, call.Arguments)
 	} else {
 		output, err = tool.Execute(ctx, call.Arguments)
 	}
 	if err != nil {
-		return toolErrorResult(call, output, exitCode, err)
+		return toolErrorResult(ctx, call, output, exitCode, err)
 	}
 	effect := schema.EffectUnknown
 	switch call.Name {
@@ -244,7 +271,11 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 			effect = schema.EffectNone
 		}
 	}
-	return schema.NewToolResult(call.ID, output, schema.ToolSucceeded, effect, "", exitCode)
+	result = schema.NewToolResult(call.ID, output, schema.ToolSucceeded, effect, "", exitCode)
+	result.Read = read
+	result.ReadContent = readContent
+	result.Discovery = discovery
+	return result
 }
 
 func cancelledBeforeExecution(id string, err error) schema.ToolResult {
@@ -255,26 +286,37 @@ func cancelledBeforeExecution(id string, err error) schema.ToolResult {
 	return schema.NewToolResult(id, message, schema.ToolCancelled, schema.EffectNone, kind, nil)
 }
 
-func toolErrorResult(call schema.ToolCall, output string, exitCode *int, err error) schema.ToolResult {
+func toolErrorResult(ctx context.Context, call schema.ToolCall, output string, exitCode *int, err error) schema.ToolResult {
 	status, effect, kind := schema.ToolFailed, schema.EffectUnknown, "执行失败"
 	if IsReadOnly(call.Name) || call.Name == "spawn_subagent" {
 		effect = schema.EffectNone
 	}
 	var detail *executionError
+	var networkError net.Error
 	if errors.As(err, &detail) {
 		status, effect, kind = detail.status, detail.effect, detail.kind
 		if detail.exitCode != nil {
 			exitCode = detail.exitCode
 		}
-	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	} else if ctx.Err() != nil {
 		status, kind = schema.ToolCancelled, "取消"
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			kind = "超时"
 		}
+	} else if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &networkError) && networkError.Timeout() {
+		kind = "超时"
 	}
 	message := fmt.Sprintf("%s: %v", call.Name, err)
 	if strings.TrimSpace(output) != "" {
 		message += "\n" + output
 	}
-	return schema.NewToolResult(call.ID, message, status, effect, kind, exitCode)
+	result := schema.NewToolResult(call.ID, message, status, effect, kind, exitCode)
+	if detail != nil {
+		result.ErrorCode = detail.code
+		if detail.retryable != nil {
+			retryable := *detail.retryable
+			result.Retryable = &retryable
+		}
+	}
+	return result
 }

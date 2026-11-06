@@ -212,9 +212,34 @@ func (x *Index) scanObservations(tasks map[string]Task, attempts map[string]Atte
 			if t.RecordQuality != "corrupt" {
 				t.RecordQuality = a.RecordQuality
 			}
-			if returned && t.EngineStatus != "" && (t.EngineStatus != a.Status || t.StopCode != a.StopCode) {
+			if returned && t.EngineStatus != "" && (t.EngineStatus != a.Status || t.StopCode != a.StopCode ||
+				(a.ResultRunID != "" && t.ResultRunID != "" && a.ResultRunID != t.ResultRunID)) {
 				t.FinalText = ""
+				t.PartialReport = nil
+				t.Analysis = nil
+				t.Reading = nil
 				t.Alerts = append(t.Alerts, Alert{Code: "result_mismatch", Message: "入口返回观察与历史持久结果不同，请分别核对。", AttemptID: a.ID})
+			}
+			// 新入口先于 taskstore.started 被观察到时，也不能展示上次运行的分析。
+			// 当前 finished 的提交边界可证明部分报告已经属于本次调用。
+			if !returned && (t.PartialReport != nil || t.Analysis != nil || t.Reading != nil) {
+				currentFinish := false
+				if source := x.sources[id]; source != nil && source.view.Result != nil {
+					for _, ev := range s.events {
+						if ev.EventType == "task_event_committed" && textField(ev.Payload, "source_kind") == "finished" && ev.SourceTaskSequence == source.view.Sequence {
+							currentFinish = true
+							break
+						}
+					}
+				}
+				if !currentFinish {
+					if t.Analysis != nil || t.Reading != nil {
+						t.FinalText = ""
+					}
+					t.PartialReport = nil
+					t.Analysis = nil
+					t.Reading = nil
+				}
 			}
 		}
 		tasks[id] = t

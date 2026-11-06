@@ -64,7 +64,7 @@ func TestBudgetContextCoversPlanningThinkingAndSubagents(t *testing.T) {
 	registry := NewWorkspaceRegistry(dir)
 	eng := NewAgentEngine(provider, registry, EngineOptions{Plan: true, EnableThinking: true, Budget: Budget{MaxModelCalls: 7, MaxToolCalls: 20}})
 	registry.Register(tools.NewSubagentTool(eng, NewExplorerRegistry(dir), reporter))
-	result, err := eng.Run(context.Background(), ctxpkg.NewSession("预算覆盖", dir), TaskSpec{Goal: "委派核查文件"}, reporter)
+	result, err := eng.Run(context.Background(), ctxpkg.NewSession("预算覆盖", dir), TaskSpec{Goal: "委派核查文件", Delegation: "on"}, reporter)
 	if err != nil || result.Status != Answered || result.Usage.ModelCalls != 7 || calls != 7 || reporter.messages != 0 || result.FinalText != "已完成核对。" {
 		t.Fatalf("预算或文字发布结果不符: %+v %v，调用 %d，发布 %d", result, err, calls, reporter.messages)
 	}

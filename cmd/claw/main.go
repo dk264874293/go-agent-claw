@@ -18,22 +18,25 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
+	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
-	"github.com/joho/godotenv"
 )
 
 func main() { os.Exit(runCLI()) }
 
 func runCLI() int {
 	prompt := flag.String("prompt", "", "单次任务目标；留空进入交互模式")
-	modelName := flag.String("model", provider.DefaultOpenAIModel, "OpenAI 模型，真实对照评估应显式指定")
+	channelName := flag.String("provider", "auto", "模型渠道：auto、openai、zhipu、deepseek，auto 按模型选择")
+	modelName := flag.String("model", provider.DefaultModel, "模型名称")
 	dir := flag.String("dir", ".", "工作区目录")
 	sessionID := flag.String("session", "cli_default_session", "会话 ID")
-	mode := flag.String("mode", "readonly", "执行模式：readonly、workspace、trusted")
+	mode := flag.String("mode", "workspace", "执行模式：readonly、workspace、trusted")
 	kind := flag.String("task-kind", "", "任务类型：answer 或 change；默认按执行模式推断")
 	verify := flag.String("verify", "", "用户指定的验收命令，仅 trusted 模式可执行")
 	resume := flag.String("resume", "", "恢复指定任务 ID")
 	plan := flag.Bool("plan", false, "使用有依赖的结构化计划")
+	analysis := flag.Bool("analysis", false, "显式启用带证据引用的只读分析报告；恢复沿用原任务设置")
+	delegation := flag.String("delegation", "", "只读回答的委派策略：auto、off、on；默认auto，恢复沿用原任务设置")
 	thinking := flag.Bool("thinking", false, "每轮先执行一次无工具推理")
 	maxTurns := flag.Int("max-turns", 0, "主任务最多轮数，默认 30")
 	maxModels := flag.Int("max-model-calls", 0, "最多模型调用次数，默认 60")
@@ -41,6 +44,17 @@ func runCLI() int {
 	timeout := flag.Duration("timeout", 0, "累计运行时限，默认 10m")
 	contextBytes := flag.Int("context-bytes", 300000, "请求材料字节上限")
 	flag.Parse()
+	modelExplicit := false
+	flag.Visit(func(f *flag.Flag) { modelExplicit = modelExplicit || f.Name == "model" })
+	requestedModel := *modelName
+	if !modelExplicit {
+		requestedModel = ""
+	}
+	channel, model, modelErr := provider.ResolveModelConfig(*channelName, requestedModel)
+	if modelErr != nil {
+		fmt.Fprintln(os.Stderr, modelErr)
+		return 2
+	}
 	if *mode != "readonly" && *mode != "workspace" && *mode != "trusted" ||
 		*kind != "" && *kind != "answer" && *kind != "change" ||
 		*verify != "" && *mode != "trusted" ||
@@ -49,14 +63,31 @@ func runCLI() int {
 		fmt.Fprintln(os.Stderr, "运行参数无效，请查看 -help。恢复任务时使用原目标与验收配置。")
 		return 2
 	}
+	spec := engine.TaskSpec{ID: *resume, Resume: *resume != "", Goal: *prompt, Kind: engine.TaskKind(*kind), VerifyCommand: *verify}
+	if err := applyCLIAnalysis(&spec, *analysis, tools.Mode(*mode)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIDelegation(&spec, *delegation, tools.Mode(*mode)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	workDir, err := filepath.Abs(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "无法定位工作区: %v\n", err)
 		return 1
 	}
-	_ = godotenv.Overload()
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		fmt.Fprintln(os.Stderr, "请先设置 OPENAI_API_KEY")
+	if err := runtimeenv.LoadDotenv(true); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := runtimeenv.ApplyDefaults(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	llm, err := provider.NewConfiguredProvider(channel, model)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	if *mode == "trusted" {
@@ -65,17 +96,21 @@ func runCLI() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	sess := ctxpkg.NewSession(*sessionID, workDir)
-	model := strings.TrimSpace(*modelName)
 	registry := engine.NewWorkspaceRegistry(workDir)
 	options := engine.EngineOptions{
 		Mode: tools.Mode(*mode), Plan: *plan, EnableThinking: *thinking, MaxContextBytes: *contextBytes,
 		Budget: engine.Budget{MaxTurns: *maxTurns, MaxModelCalls: *maxModels, MaxToolCalls: *maxTools, Timeout: *timeout},
 	}
-	eng := engine.NewAgentEngine(observability.NewCostTracker(provider.NewOpenAIProvider(model), model, sess), registry, options)
+	eng := engine.NewAgentEngine(observability.NewCostTracker(llm, model, sess), registry, options)
 	reporter := engine.NewTerminalReporter()
 	registry.Register(tools.NewSubagentTool(eng, engine.NewExplorerRegistry(workDir), reporter))
-	spec := engine.TaskSpec{ID: *resume, Resume: *resume != "", Goal: *prompt, Kind: engine.TaskKind(*kind), VerifyCommand: *verify}
 	fmt.Printf("工作区 %s · 执行模式 %s\n", workDir, *mode)
+	if spec.Analysis {
+		fmt.Println("分析模式已启用：重要结论须有有效引用，引用校验不代表结论已经验收。")
+	}
+	if *resume == "" && tools.Mode(*mode) == tools.ModeReadOnly && (spec.Kind == "" || spec.Kind == engine.TaskAnswer) {
+		fmt.Printf("只读委派策略 %s · 小范围任务由根 Agent 执行\n", spec.Delegation)
+	}
 	if *prompt == "" && *resume == "" {
 		runREPL(ctx, eng, sess, reporter, model, options, spec)
 		if ctx.Err() != nil {
@@ -86,6 +121,39 @@ func runCLI() int {
 	result := submit(ctx, eng, sess, reporter, spec)
 	printUsage(sess.UsageSnapshot())
 	return result.ExitCode()
+}
+
+// applyCLIAnalysis 只影响新建任务；恢复不得覆盖持久任务中的分析选择。
+func applyCLIAnalysis(spec *engine.TaskSpec, enabled bool, mode tools.Mode) error {
+	if spec.Resume || !enabled {
+		return nil
+	}
+	if mode != tools.ModeReadOnly || spec.Kind != "" && spec.Kind != engine.TaskAnswer || spec.VerifyCommand != "" {
+		return fmt.Errorf("分析模式仅支持 readonly + answer，不能设置验收命令。")
+	}
+	spec.Analysis, spec.Kind = true, engine.TaskAnswer
+	return nil
+}
+
+// 恢复必须复用账本中的策略和累计准入，不能用启动参数重置。
+func applyCLIDelegation(spec *engine.TaskSpec, value string, mode tools.Mode) error {
+	if value != "" && value != "auto" && value != "off" && value != "on" {
+		return fmt.Errorf("委派策略必须为 auto、off 或 on。")
+	}
+	if spec.Resume {
+		return nil
+	}
+	applicable := mode == tools.ModeReadOnly && (spec.Kind == "" || spec.Kind == engine.TaskAnswer)
+	if value != "" && !applicable {
+		return fmt.Errorf("委派策略仅适用于 readonly + answer 任务。")
+	}
+	if applicable {
+		if value == "" {
+			value = "auto"
+		}
+		spec.Delegation = value
+	}
+	return nil
 }
 
 func submit(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session, reporter engine.Reporter, spec engine.TaskSpec) engine.RunResult {

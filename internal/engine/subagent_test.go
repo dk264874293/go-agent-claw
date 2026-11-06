@@ -50,7 +50,8 @@ func TestSubagentReturnsOnlyReadEvidence(t *testing.T) {
 		if !ok || json.Unmarshal([]byte(body), &report) != nil {
 			t.Fatalf("父任务未收到可解析报告: %s", last.Content)
 		}
-		if report.Status != "PARTIAL" || len(report.Evidence) != 1 || report.Evidence[0].Line != 2 || len(report.Unverified) != 1 {
+		// 新交接返回完整紧凑目录，引用位于逐条发现中，不再重复编码顶层 Evidence。
+		if report.Status != "PARTIAL" || report.Handoff == nil || len(report.Handoff.Items) != 1 || len(report.Handoff.Items[0].Evidence) != 1 || report.Handoff.Items[0].Evidence[0].Line != 2 || len(report.Unverified) != 1 {
 			t.Fatalf("未正确核对实际读取行: %+v", report)
 		}
 		return reply("已核对第二行。")
@@ -58,7 +59,7 @@ func TestSubagentReturnsOnlyReadEvidence(t *testing.T) {
 	registry := NewWorkspaceRegistry(dir)
 	engine := NewAgentEngine(provider, registry, EngineOptions{Budget: Budget{MaxModelCalls: 4}})
 	registry.Register(tools.NewSubagentTool(engine, NewExplorerRegistry(dir), nil))
-	result, err := engine.Run(context.Background(), ctxpkg.NewSession("子任务", dir), TaskSpec{Goal: "确认第二行"}, nil)
+	result, err := engine.Run(context.Background(), ctxpkg.NewSession("子任务", dir), TaskSpec{Goal: "确认第二行", Delegation: "on"}, nil)
 	if err != nil || result.Status != Answered || result.Usage.ModelCalls != 4 || result.Usage.ToolCalls != 2 {
 		t.Fatalf("主子任务未按同一预算结算: %+v, %v", result, err)
 	}

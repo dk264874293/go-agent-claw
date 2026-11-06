@@ -11,19 +11,36 @@ import (
 
 	"github.com/dk264874293/go-agent-claw/internal/eval"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
-	"github.com/joho/godotenv"
+	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
 )
 
 func main() {
-	model := flag.String("model", provider.DefaultOpenAIModel, "评测模型，glm-* 使用智谱")
+	model := flag.String("model", provider.DefaultModel, "评测模型")
+	channelName := flag.String("provider", "auto", "模型渠道：auto、openai、zhipu、deepseek")
 	flag.Parse()
-	_ = godotenv.Load()
-	key, newProvider := "OPENAI_API_KEY", provider.NewOpenAIProvider
-	if strings.HasPrefix(*model, "glm-") {
-		key, newProvider = "ZHIPU_API_KEY", provider.NewZhipuOpenAIProvider
+	if err := runtimeenv.LoadDotenv(false); err != nil {
+		log.Fatal(err)
 	}
-	if os.Getenv(key) == "" {
-		log.Fatalf("请先导出 %s 环境变量进行评测", key)
+	if err := runtimeenv.ApplyDefaults(); err != nil {
+		log.Fatal(err)
+	}
+	*model = strings.TrimSpace(*model)
+	modelExplicit := false
+	flag.Visit(func(f *flag.Flag) { modelExplicit = modelExplicit || f.Name == "model" })
+	requestedModel := *model
+	if !modelExplicit {
+		requestedModel = ""
+	} else if requestedModel == "" {
+		log.Fatal("请提供有效的模型名称")
+	}
+	channel, resolvedModel, err := provider.ResolveModelConfig(*channelName, requestedModel)
+	if err != nil {
+		log.Fatal(err)
+	}
+	*model = resolvedModel
+	llm, err := provider.NewConfiguredProvider(channel, *model)
+	if err != nil {
+		log.Fatal(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	testcases := []observability.TestCase{
@@ -40,7 +57,7 @@ func main() {
 			ValidateScript: `set -e; test -f math_test.go; output=$(go test -count=1 -v -run '^TestMultiply$' .); printf '%s\n' "$output"; printf '%s\n' "$output" | grep -E '^--- PASS: TestMultiply '`,
 		},
 	}
-	ok := observability.NewBenchmarkRunner(*model, newProvider(*model)).RunSuite(ctx, testcases)
+	ok := observability.NewBenchmarkRunner(*model, llm).RunSuite(ctx, testcases)
 	stop()
 	if !ok {
 		os.Exit(1)

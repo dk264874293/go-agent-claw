@@ -18,23 +18,51 @@ func observationForTool(call schema.ToolCall) observe.Payload {
 		}
 	}
 	var args struct {
-		Path      string `json:"path"`
-		Offset    int64  `json:"offset"`
-		Limit     int64  `json:"limit"`
-		Content   string `json:"content"`
-		OldString string `json:"old_string"`
-		NewString string `json:"new_string"`
+		ID         string   `json:"id"`
+		Path       string   `json:"path"`
+		Offset     int64    `json:"offset"`
+		Limit      int64    `json:"limit"`
+		StartLine  int64    `json:"start_line"`
+		EndLine    int64    `json:"end_line"`
+		Content    string   `json:"content"`
+		OldString  string   `json:"old_string"`
+		NewString  string   `json:"new_string"`
+		ReportID   string   `json:"report_id"`
+		FindingIDs []string `json:"finding_ids"`
 	}
 	if json.Unmarshal(call.Arguments, &args) != nil {
 		return p
 	}
 	switch call.Name {
-	case "read_file", "write_file", "edit_file", "list_dir", "search_text":
+	case "read_report":
+		if validObservationArtifactID(args.ReportID) {
+			p.ReportID = args.ReportID
+		}
+		p.FindingCount = int64(len(args.FindingIDs))
+	case "read_evidence":
+		if validObservationArtifactID(args.ID) {
+			p.ArtifactID = args.ID
+		}
+		p.Offset, p.Limit = args.Offset, args.Limit
+	case "read_file", "read_lines", "write_file", "edit_file", "list_dir", "search_text", "find_files":
 		if filepath.IsLocal(args.Path) {
 			p.Path = filepath.Clean(args.Path)
 		}
 		p.Offset, p.Limit = args.Offset, args.Limit
+		p.StartLine, p.EndLine = args.StartLine, args.EndLine
 		p.ContentBytes = int64(len(args.Content) + len(args.OldString) + len(args.NewString))
 	}
 	return p
+}
+
+func validObservationArtifactID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, char := range id {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

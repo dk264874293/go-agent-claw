@@ -201,7 +201,7 @@ func TestObservedSubagentIdentity(t *testing.T) {
 	r := NewWorkspaceRegistry(dir)
 	eng := NewAgentEngine(p, r, EngineOptions{})
 	r.Register(tools.NewSubagentTool(eng, NewExplorerRegistry(dir), nil))
-	result, events := observedRun(t, eng, ctxpkg.NewSession("子任务观测", dir), TaskSpec{Goal: "调查"})
+	result, events := observedRun(t, eng, ctxpkg.NewSession("子任务观测", dir), TaskSpec{Goal: "调查", Delegation: "on"})
 	if result.Status != Answered || result.Usage.ModelCalls != 3 {
 		t.Fatal(result)
 	}

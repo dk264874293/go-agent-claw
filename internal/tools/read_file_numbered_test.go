@@ -114,8 +114,11 @@ func TestNumberedReadPagesRoundTripWithinDisplayBudget(t *testing.T) {
 			if page.String() != source[offset:end] {
 				t.Fatal("编号、分页或截断改变了源文件内容")
 			}
-			if end < len(source) && !strings.HasSuffix(header, "下一段 offset: "+strconv.Itoa(end)) {
+			if end < len(source) && !strings.Contains(header+"\n", "下一段 offset: "+strconv.Itoa(end)+"\n") {
 				t.Fatalf("下一段起点与返回字节不一致: %q", header)
+			}
+			if !strings.Contains(header, fmt.Sprintf("EOF: %t", end == len(source))) {
+				t.Fatalf("文件结束状态错误: %q", header)
 			}
 			rebuilt.WriteString(page.String())
 			offset = end
@@ -134,7 +137,7 @@ func TestNumberedReadPreservesRawDefaultAndValidation(t *testing.T) {
 	defaultResult := runTestTool(ctx, r, "read_file", args)
 	args["line_numbers"] = false
 	rawResult := runTestTool(ctx, r, "read_file", args)
-	want := fmt.Sprintf("文件: source.go\n版本: %x\n字节范围: [4, 7)，共 %d 字节\n行号范围: [2, 2]\n下一段 offset: 7\n\n乙", sha256.Sum256([]byte(source)), len(source))
+	want := fmt.Sprintf("文件: source.go\n版本: %x\n字节范围: [4, 7)，共 %d 字节\n行号范围: [2, 2]\n下一段 offset: 7\nEOF: false\n\n乙", sha256.Sum256([]byte(source)), len(source))
 	if defaultResult.IsError || rawResult.IsError || defaultResult.Output != want || rawResult.Output != want {
 		t.Fatalf("默认原始读取格式发生变化: 默认 %+v，显式 false %+v", defaultResult, rawResult)
 	}

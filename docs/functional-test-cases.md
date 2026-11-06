@@ -39,10 +39,10 @@ CLI 用例在没有 `.env` 的临时目录启动，以隔离仓库中的配置�
 | CLI-01 | P0 · 本地 | 执行 `"$CLAW_QA_BIN" -help`。 | 退出码 `0`。列出模式、验收、恢复、规划、Thinking、调用上限、超时及上下文限制。 |
 | CLI-02 | P0 · 本地 | 分别传入 `-mode invalid`、`-task-kind invalid`、`-max-tool-calls -1`、`-context-bytes 0`、默认模式下的 `-verify true`，以及组合 `-resume invalid -prompt 测试`。 | 每组提示运行参数无效，退出码 `2`。请求在启动 Provider 前被拒绝。 |
 | CLI-03 | P1 · 本地 | 临时目录下执行 `OPENAI_API_KEY= "$CLAW_QA_BIN" -dir "$CLAW_QA_CASE" -prompt 测试`。另用占位密钥提交同一任务，将目录换成 `"$CLAW_QA_DIR/not-created"`。 | 缺密钥时提示设置 `OPENAI_API_KEY`。目录不存在时任务为 `FAILED`。两次退出码均为 `1`。 |
-| CLI-04 | P0 · 本地 | 用占位密钥进入 REPL，依次输入 `/help`、`/status`、`/cost`、`/clear`、`/unknown`、`/exit`。 | 显示命令列表、只读模式、零条历史和用量信息。清空后给出确认，未知命令给出提示，退出码 `0`。工作区中没有新增任务记录。 |
+| CLI-04 | P0 · 本地 | 用占位密钥进入 REPL，依次输入 `/help`、`/status`、`/cost`、`/clear`、`/unknown`、`/exit`。 | 显示命令列表、`workspace` 模式、零条历史和用量信息。清空后给出确认，未知命令给出提示，退出码 `0`。工作区中没有新增任务记录。 |
 | CLI-05 | P1 · 本地 | 用占位密钥进入 REPL。输入两行独立的 `"""`。另一次输入开头的 `"""` 与一行正文，随后结束 stdin。 | 空内容被忽略。未闭合的多行输入在 EOF 时取消。两次均没有任务记录。 |
 | CLI-06 | P1 · 真实模型 | 用 `-mode readonly` 进入 REPL。输入 `"""`、`请原样返回接下来两行文字`、`/help`、`exit`、`"""`。看到回复后单独输入 `/exit`。 | 多行内容只提交一次。正文中的 `/help` 和 `exit` 不触发本地命令。单独的 `/exit` 正常退出。 |
-| CLI-07 | P0 · 真实模型 | 在新夹具执行 `"$CLAW_QA_BIN" -dir "$CLAW_QA_CASE" -prompt '请读取 status.txt 并返回文件内容'`。 | 回复与 `draft` 一致，任务为 `ANSWERED`，退出码 `0`。`status.txt` 字节不变。 |
+| CLI-07 | P0 · 真实模型 | 在新夹具执行 `"$CLAW_QA_BIN" -dir "$CLAW_QA_CASE" -mode readonly -prompt '请读取 status.txt 并返回文件内容'`。 | 回复与 `draft` 一致，任务为 `ANSWERED`，退出码 `0`。`status.txt` 字节不变。 |
 | CLI-08 | P1 · 真实模型 | 进入 REPL，提交与 CLI-07 相同的读取请求，再执行 `/cost`、`/status`、`/clear`、`/status`。 | 提交后显示会话和上一轮用量。清空后消息数为零，累计用量与已有任务记录保留。金额口径见 OBS-01。 |
 
 CLI-04 和 CLI-05 可直接复制以下输入。单次 CLI 命令结束后立即运行 `printf '退出码 %s\n' "$?"` 读取退出码。

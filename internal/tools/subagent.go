@@ -27,16 +27,51 @@ type SubtaskSpec struct {
 }
 
 type EvidenceRef struct {
-	Path    string `json:"path"`
-	Line    int    `json:"line"`
-	Version string `json:"version"`
+	Path       string `json:"path"`
+	Line       int    `json:"line"`
+	Version    string `json:"version"`
+	EndLine    int    `json:"end_line,omitempty"`
+	ActionID   string `json:"action_id,omitempty"`
+	EvidenceID string `json:"evidence_id,omitempty"`
+	Quote      string `json:"quote,omitempty"`
+}
+
+// ReportFinding 是可按身份读取的完整发现。Status 由引擎核对，不采纳模型自报值。
+type ReportFinding struct {
+	ID               string        `json:"id"`
+	Statement        string        `json:"statement"`
+	Context          string        `json:"context,omitempty"`
+	Limitations      string        `json:"limitations,omitempty"`
+	ScopeRequirement string        `json:"scope_requirement,omitempty"`
+	DependsOn        []string      `json:"depends_on,omitempty"`
+	Evidence         []EvidenceRef `json:"evidence,omitempty"`
+	Status           string        `json:"status,omitempty"`
+}
+
+// ReportHandoff 的四个状态具有独立含义，未运行脚本不使有效阅读依据失效。
+type ReportHandoff struct {
+	ReportID          string                  `json:"report_id"`
+	ArtifactID        string                  `json:"artifact_id"`
+	OriginRunID       string                  `json:"origin_run_id"`
+	Execution         string                  `json:"execution"`
+	Citations         string                  `json:"citations"`
+	Verification      string                  `json:"verification"`
+	StopCode          string                  `json:"stop_code,omitempty"`
+	Coverage          *schema.ReadingCoverage `json:"coverage,omitempty"`
+	Items             []ReportFinding         `json:"items"`
+	Omitted           int                     `json:"omitted"`
+	NextAfterID       string                  `json:"next_after_id,omitempty"`
+	UnverifiedOmitted int                     `json:"unverified_omitted,omitempty"`
 }
 
 type SubtaskReport struct {
-	Findings   string        `json:"findings"`
-	Evidence   []EvidenceRef `json:"evidence"`
-	Unverified []string      `json:"unverified"`
-	Status     string        `json:"status"`
+	Findings   string               `json:"findings"`
+	Evidence   []EvidenceRef        `json:"evidence"`
+	Unverified []string             `json:"unverified"`
+	Status     string               `json:"status"`
+	Coverage   []schema.ReadReceipt `json:"coverage,omitempty"`
+	ArtifactID string               `json:"artifact_id,omitempty"`
+	Handoff    *ReportHandoff       `json:"handoff,omitempty"`
 }
 
 // AgentRunner 避免工具包与引擎包循环依赖。
@@ -98,12 +133,61 @@ func (t *SubagentTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 	log.Printf("[子智能体] 开始只读探索")
 	report, runErr := t.runner.RunSub(ctx, spec, t.readOnlyRegistry, t.reporter)
-	encoded, err := json.Marshal(report)
+	encoded, err := EncodeSubtaskHandoff(report)
 	if err != nil {
 		return "", err
 	}
 	if runErr != nil {
+		if rejected, ok := runErr.(interface{ DelegationRejected() bool }); ok && rejected.DelegationRejected() {
+			retryable := false
+			return string(encoded), &executionError{status: schema.ToolRejected, effect: schema.EffectNone, kind: "委派未准入", code: "delegation_not_admitted", retryable: &retryable, err: runErr}
+		}
 		return string(encoded), fmt.Errorf("子智能体执行失败: %w", runErr)
 	}
 	return string(encoded), nil
+}
+
+// EncodeSubtaskHandoff 按完整条目缩减，任何返回都是完整 JSON；完整材料仍在 ArtifactID。
+func EncodeSubtaskHandoff(report SubtaskReport) ([]byte, error) {
+	if report.Handoff == nil {
+		return json.Marshal(report) // 非目标修改任务及旧外部Runner保持原返回行为。
+	}
+	copy := report
+	handoff := *report.Handoff
+	copy.Handoff = &handoff
+	handoff.Items = append([]ReportFinding(nil), handoff.Items...)
+	copy.Coverage = nil
+	copy.Evidence = nil
+	copy.Findings = "结构化子报告已保存，请优先复用目录；需要细节时使用 read_report。"
+	if handoff.Coverage != nil {
+		c := *handoff.Coverage
+		c.Files = nil
+		handoff.Coverage = &c
+	}
+	// 限制项不能靠截断字符串变成另一条陈述，仅按整项省略。
+	copy.Unverified = append([]string(nil), report.Unverified...)
+	for {
+		handoff.NextAfterID = ""
+		if handoff.Omitted > 0 && len(handoff.Items) > 0 {
+			handoff.NextAfterID = handoff.Items[len(handoff.Items)-1].ID
+		}
+		encoded, err := json.Marshal(copy)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= 8192 {
+			return encoded, nil
+		}
+		if len(copy.Unverified) > 0 {
+			copy.Unverified = copy.Unverified[:len(copy.Unverified)-1]
+			handoff.UnverifiedOmitted++
+			continue
+		}
+		if len(handoff.Items) > 0 {
+			handoff.Items = handoff.Items[:len(handoff.Items)-1]
+			handoff.Omitted++
+			continue
+		}
+		return nil, fmt.Errorf("子报告元数据超过 8 KiB，请通过材料引用读取")
+	}
 }

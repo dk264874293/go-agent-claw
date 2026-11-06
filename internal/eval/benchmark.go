@@ -23,6 +23,8 @@ type TestCase struct {
 	TaskPrompt     string
 	ValidateScript string
 	MaxTurns       int
+	Analysis       bool
+	Delegation     string
 }
 
 type TestResult struct {
@@ -71,8 +73,9 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase, p prov
 	result.TestCaseID, result.Status = tc.ID, engine.Failed
 	started := time.Now()
 	defer func() { result.DurationMs = time.Since(started).Milliseconds() }()
-	if tc.ValidateScript == "" {
-		result.ErrorMsg = "评测缺少验收脚本"
+	spec, mode, err := benchmarkTaskSpec(tc)
+	if err != nil {
+		result.ErrorMsg = err.Error()
 		return result
 	}
 	workDir, err := os.MkdirTemp("", "claw-bench-")
@@ -97,10 +100,9 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase, p prov
 	tracked := observability.NewCostTracker(p, b.modelName, session)
 	registry := engine.NewWorkspaceRegistry(workDir)
 	eng := engine.NewAgentEngine(tracked, registry, engine.EngineOptions{
-		Mode: tools.ModeTrusted, Budget: engine.Budget{MaxTurns: tc.MaxTurns},
+		Mode: mode, Budget: engine.Budget{MaxTurns: tc.MaxTurns},
 	})
 	registry.Register(tools.NewSubagentTool(eng, engine.NewExplorerRegistry(workDir), nil))
-	spec := engine.TaskSpec{Kind: engine.TaskChange, Goal: tc.TaskPrompt, VerifyCommand: tc.ValidateScript}
 	options := eng.ObservationOptions(workDir, "bench", spec)
 	options.Model = b.modelName
 	ctx, attempt := observe.StartFromEnv(ctx, options)
@@ -109,6 +111,10 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase, p prov
 	ctx = observe.WithTask(ctx, run.TaskID)
 	attempt.Returned(engine.ObservationResult(run, err))
 	result.Status, result.Passed = run.Status, run.Status == engine.Verified
+	if spec.Kind == engine.TaskAnswer {
+		// 只证明报告符合引擎证据契约，不能冒充结论语义验收。
+		result.Passed = run.Status == engine.Answered && (!spec.Analysis || run.Analysis != nil)
+	}
 	result.Usage, result.RunUsage = session.UsageSnapshot(), run.Usage
 	if err != nil {
 		result.ErrorMsg = err.Error()
@@ -116,4 +122,24 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase, p prov
 		result.ErrorMsg = run.Reason
 	}
 	return result
+}
+
+func benchmarkTaskSpec(tc TestCase) (engine.TaskSpec, tools.Mode, error) {
+	if tc.Analysis || tc.Delegation != "" {
+		if tc.ValidateScript != "" {
+			return engine.TaskSpec{}, "", fmt.Errorf("分析评测不能设置验收脚本；只读回答的结论正确性须独立判定")
+		}
+		delegation := tc.Delegation
+		if delegation == "" {
+			delegation = "auto"
+		}
+		if delegation != "auto" && delegation != "off" && delegation != "on" {
+			return engine.TaskSpec{}, "", fmt.Errorf("委派策略必须是 auto、off 或 on")
+		}
+		return engine.TaskSpec{Kind: engine.TaskAnswer, Mode: tools.ModeReadOnly, Goal: tc.TaskPrompt, Analysis: tc.Analysis, Delegation: delegation}, tools.ModeReadOnly, nil
+	}
+	if tc.ValidateScript == "" {
+		return engine.TaskSpec{}, "", fmt.Errorf("评测缺少验收脚本")
+	}
+	return engine.TaskSpec{Kind: engine.TaskChange, Goal: tc.TaskPrompt, VerifyCommand: tc.ValidateScript}, tools.ModeTrusted, nil
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf8"
 )
 
 const (
@@ -340,39 +341,94 @@ func (t *Task) SaveArtifact(id string, data []byte) error {
 
 // ReadArtifact 按字节读取当前任务的材料。
 func (t *Task) ReadArtifact(id string, offset, limit int) ([]byte, error) {
+	page, err := t.readArtifactPage(id, offset, limit, false)
+	return page.Data, err
+}
+
+// ArtifactPage 的范围和下一段位置均按源材料字节计数，不按显示字符计数。
+type ArtifactPage struct {
+	Data       []byte
+	Offset     int64
+	NextOffset int64
+	Total      int64
+	EOF        bool
+}
+
+// ReadArtifactPage 在 UTF-8 字符边界分页；原 ReadArtifact 保留原始字节读取语义。
+func (t *Task) ReadArtifactPage(id string, offset, limit int) (ArtifactPage, error) {
+	return t.readArtifactPage(id, offset, limit, true)
+}
+
+func (t *Task) readArtifactPage(id string, offset, limit int, textPage bool) (page ArtifactPage, err error) {
+	page.Offset, page.NextOffset = int64(offset), int64(offset)
 	if !validID(id) {
-		return nil, errors.New("材料 ID 必须是 32 位小写十六进制字符")
+		return page, errors.New("材料 ID 必须是 32 位小写十六进制字符")
 	}
 	if offset < 0 || limit <= 0 {
-		return nil, errors.New("材料偏移量必须为非负数，读取长度必须为正数")
+		return page, errors.New("材料偏移量必须为非负数，读取长度必须为正数")
 	}
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	if t.log == nil {
-		return nil, fs.ErrClosed
+		return page, fs.ErrClosed
 	}
 	root, err := openDirectory(t.root, "artifacts", false)
 	if err != nil {
-		return nil, fmt.Errorf("打开任务材料目录: %w", err)
+		return page, fmt.Errorf("打开任务材料目录: %w", err)
 	}
 	defer root.Close()
 	file, err := openRegular(root, id, os.O_RDONLY)
 	if err != nil {
-		return nil, fmt.Errorf("打开任务材料: %w", err)
+		return page, fmt.Errorf("打开任务材料: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("读取材料信息: %w", err)
+		return page, fmt.Errorf("读取材料信息: %w", err)
 	}
+	page.Total = info.Size()
 	if int64(offset) >= info.Size() {
-		return []byte{}, nil
+		page.Data, page.EOF = []byte{}, true
+		return page, nil
 	}
-	data, err := io.ReadAll(io.NewSectionReader(file, int64(offset), min(int64(limit), info.Size()-int64(offset))))
+	start, length := int64(offset), min(int64(limit), info.Size()-int64(offset))
+	if textPage {
+		// 最多额外读取三个前缀字节及四个后缀字节，判断片段两端的字符边界。
+		start = max(int64(0), int64(offset)-(utf8.UTFMax-1))
+		end := int64(offset) + length
+		end += min(info.Size()-end, int64(utf8.UTFMax))
+		length = end - start
+	}
+	data, err := io.ReadAll(io.NewSectionReader(file, start, length))
 	if err != nil {
-		return nil, fmt.Errorf("读取任务材料: %w", err)
+		return page, fmt.Errorf("读取任务材料: %w", err)
 	}
-	return data, nil
+	if textPage {
+		prefix := int(int64(offset) - start)
+		for i := 0; i < prefix; i++ {
+			_, size := utf8.DecodeRune(data[i:])
+			if i+size > prefix {
+				return page, fmt.Errorf("offset %d 位于 UTF-8 字符中间，请使用 offset %d 或上一页返回的下一段 offset", offset, start+int64(i))
+			}
+		}
+		data = data[prefix:]
+		consumed := 0
+		for consumed < len(data) && consumed < limit {
+			_, size := utf8.DecodeRune(data[consumed:])
+			if size > limit-consumed {
+				break
+			}
+			consumed += size
+		}
+		if consumed == 0 && len(data) > 0 {
+			_, size := utf8.DecodeRune(data)
+			return page, fmt.Errorf("limit %d 无法容纳完整 UTF-8 字符，请使用至少 %d 字节", limit, size)
+		}
+		data = data[:consumed]
+	}
+	page.Data, page.NextOffset = data, int64(offset)+int64(len(data))
+	page.EOF = page.NextOffset >= page.Total
+	return page, nil
 }
 
 func validID(id string) bool {

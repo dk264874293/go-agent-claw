@@ -72,6 +72,9 @@ func FormatRunResult(result RunResult) string {
 	if result.StopCode != "" {
 		fmt.Fprintf(&out, "\n停止原因：%s", result.StopCode)
 	}
+	if result.Reading != nil {
+		out.WriteString("\n" + readingCoverageText(result.Reading))
+	}
 	if result.StopCode == "storage_error" {
 		out.WriteString("\n任务记录未可靠保存，以下仅为现场执行观察，不能作为已持久化证据。")
 	}
@@ -113,6 +116,24 @@ func FormatRunResult(result RunResult) string {
 	}
 	if result.FinalText != "" && (result.Status == Answered || result.Status == Verified || result.Status == NeedsVerification) && result.StopCode != "verification_stale" {
 		out.WriteString("\n\n" + result.FinalText)
+	}
+	if partial := result.PartialReport; partial != nil && strings.TrimSpace(partial.Text) != "" &&
+		result.Status != Answered && result.Status != Verified && result.Status != NeedsVerification {
+		source := "来源未知"
+		switch partial.Source {
+		case "model":
+			source = "模型收尾汇总"
+		case "recorded":
+			source = "已记录事实摘要"
+		}
+		fmt.Fprintf(&out, "\n\n部分分析／任务未完成\n来源：%s", source)
+		if partial.OriginRunID != "" {
+			fmt.Fprintf(&out, "；来源运行：%s", partial.OriginRunID)
+			if result.RunID != "" && partial.OriginRunID != result.RunID {
+				out.WriteString("（历史来源，文件当前状态须重新核实）")
+			}
+		}
+		out.WriteString("\n以下内容不代表任务已完成或验收通过。\n" + partial.Text)
 	}
 	return out.String()
 }

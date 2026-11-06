@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -55,13 +56,12 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	// 最先注册，最后执行：此时任务关闭、快照与 Trace 收尾均已结束。
 	defer func() { observe.Emit(parent, "run_finalized", ObservationResult(result, err)) }()
 	result.Status = Failed
-	if !e.options.Budget.valid() || e.options.MaxContextBytes < 1 {
+	if !e.options.Budget.valid() || e.options.MaxContextBytes < 1 || e.options.AnalysisContextBytes < 0 {
 		result.Reason = "运行预算配置无效"
 		return result, errors.New(result.Reason)
 	}
-	if parent.Err() != nil {
-		result.Status, result.Reason = Cancelled, parent.Err().Error()
-		return result, nil
+	if err := parent.Err(); err != nil {
+		return result.stop(parent, err)
 	}
 	workDir, err := filepath.EvalSymlinks(session.WorkDir)
 	if err == nil {
@@ -85,6 +85,10 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		return result.stop(parent, err)
 	}
 	defer task.Close()
+	// 直接调用引擎也需要内部根身份；不创建 Recorder、不强制新增观测落盘。
+	if (state.Spec.Analysis || readonlyAnswer(state.Spec)) && observe.Identity(parent).AgentID == "" {
+		parent = observe.WithAgent(parent, newID(), "")
+	}
 	observedMode := state.Spec.Mode
 	requestedMode := spec.Mode
 	if requestedMode == "" {
@@ -94,6 +98,7 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		observedMode = requestedMode
 	}
 	observe.Emit(parent, "run_configured", observe.Payload{
+		Analysis: state.Spec.Analysis, Delegation: state.Spec.Delegation,
 		Kind: string(state.Spec.Kind), Mode: string(observedMode), Goal: state.Spec.Goal,
 		MaxModelCalls: int64(state.Limits.MaxModelCalls), MaxToolCalls: int64(state.Limits.MaxToolCalls),
 		MaxTurns: int64(state.Limits.MaxTurns), TimeoutMS: state.Limits.Timeout.Milliseconds(),
@@ -103,6 +108,9 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		previous := *state.LastResult
 		previous.Delivery = deliveryFromState(state)
 		if previous.Status == Answered {
+			if state.Spec.Analysis {
+				previous.Reason = "复用历史分析答复；引用仅说明原运行当时的读取版本，未重新核对当前文件"
+			}
 			return previous, nil
 		}
 		if previous.Status == Verified {
@@ -159,9 +167,11 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			}
 			return nil
 		},
-		artifact: task.SaveArtifact, readArtifact: task.ReadArtifact, subSlots: make(chan struct{}, 2),
+		artifact: task.SaveArtifact, readArtifact: task.ReadArtifact, readArtifactPage: task.ReadArtifactPage,
+		runID: result.RunID, subSlots: make(chan struct{}, 2),
 	}
 	ctx = context.WithValue(ctx, runContextKey{}, r)
+	var system schema.Message
 	clockDone, clockStop := make(chan error, 1), make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -184,13 +194,37 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		}
 	}()
 	defer func() {
+		if r.readonlyAnswer() {
+			result.Reading = r.readingCoverage(ctx)
+		}
+		if r.analysisEnabled() {
+			result.Analysis = r.analysisReport(ctx)
+		}
+		if storageErr := r.storageError(); storageErr != nil {
+			err = errors.Join(err, storageErr)
+		}
+		if errors.Is(err, errStorage) {
+			result.Status, result.Reason, result.StopCode = Failed, err.Error(), "storage_error"
+		}
+		if result.Status != Answered && result.Status != Verified && result.Status != NeedsVerification {
+			partial, partialErr := e.partialForStop(ctx, r, session, system, result)
+			result.PartialReport = partial
+			if partialErr != nil {
+				err = errors.Join(err, partialErr)
+				result.Status, result.Reason, result.StopCode = Failed, partialErr.Error(), "storage_error"
+			} else if (result.Status == BudgetExhausted || result.StopCode == "readonly_repeat") && errors.Is(ctx.Err(), context.Canceled) {
+				result.Status, result.Reason, result.StopCode = Cancelled, "任务已取消", "cancelled"
+			}
+		}
+		// 收尾仍属于执行时间。计时落盘持续覆盖最后一次模型请求，之后才汇总故障。
 		close(clockStop)
 		if clockErr := <-clockDone; clockErr != nil {
 			err = errors.Join(err, clockErr)
 			result.Status, result.Reason, result.StopCode = Failed, "无法保存任务计时", "storage_error"
 		}
-		if errors.Is(err, errStorage) {
-			result.Status, result.Reason, result.StopCode = Failed, err.Error(), "storage_error"
+		if storageErr := r.storageError(); storageErr != nil {
+			err = errors.Join(err, storageErr)
+			result.Status, result.Reason, result.StopCode = Failed, storageErr.Error(), "storage_error"
 		}
 		if result.Status != Answered && result.Status != Verified && result.Status != NeedsVerification {
 			result.FinalText = ""
@@ -206,12 +240,19 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			result.Usage.Elapsed = r.elapsed + time.Since(r.started)
 			result.Verification = s.Verification
 			result.Delivery = deliveryFromState(*s)
+			if s.Spec.Analysis && s.Analysis != nil {
+				if report, ok := s.Analysis.Reports[observe.Identity(ctx).AgentID]; ok {
+					result.Analysis = &report
+				}
+			}
 			s.LastResult = &result
+			s.Reading = result.Reading
 			return nil
 		}); saveErr != nil {
 			err = errors.Join(err, saveErr)
 			result.Status, result.Reason, result.StopCode = Failed, "无法保存任务终态", "storage_error"
 			result.FinalText = ""
+			result.PartialReport = r.recordedPartial(result.Reason, "任务记录未可靠保存，以下仅为现场执行观察。")
 		} else if saveErr := task.SaveSnapshot(r.state); saveErr != nil {
 			log.Printf("无法更新任务检查点，任务日志仍可用于恢复: %v", saveErr)
 		}
@@ -224,14 +265,14 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			log.Printf("无法导出任务追踪: %v", traceErr)
 		}
 	}()
-	if err := r.record("started", func(s *taskState) error { return nil }); err != nil {
+	if err := r.record("started", func(s *taskState) error { s.Reading = nil; return nil }); err != nil {
 		return result, err
 	}
 	if err := ctx.Err(); err != nil {
-		return result.stop(parent, err)
+		return result.stop(ctx, err)
 	}
 	if reason, err := e.reconcile(ctx, r); err != nil {
-		return result.stop(parent, err)
+		return result.stop(ctx, err)
 	} else if reason != "" {
 		result.Status, result.Reason = Blocked, reason
 		return result, nil
@@ -245,7 +286,7 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	if spec.Resume && state.Verification != nil && state.Verification.Passed {
 		version, checkErr := WorkspaceVersion(ctx, workDir)
 		if checkErr != nil {
-			return result.stop(parent, checkErr)
+			return result.stop(ctx, checkErr)
 		}
 		if version == state.Verification.Version {
 			result.Status, result.Reason = Verified, "已核实中断前保存的验收证据"
@@ -264,12 +305,20 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	}
 
 	session.Append(schema.Message{Role: schema.RoleUser, Content: state.Spec.Goal})
-	system := ctxpkg.NewPromptComposer(workDir, false).Build()
+	system = ctxpkg.NewPromptComposer(workDir, false).Build()
 	system.Content += "\n\n执行模式：" + string(mode) + "。工具准入由程序控制。"
+	if spec.Resume {
+		if err := r.resumedReadonlyStop(ctx); err != nil {
+			return result.stop(ctx, err)
+		}
+	}
+	if r.toolsExhausted() {
+		return result.stop(ctx, toolLimit())
+	}
 	if state.Spec.Plan && len(state.Plan) == 0 {
 		steps, err := e.proposePlan(ctx, r, system, "")
 		if err != nil {
-			return result.stop(parent, err)
+			return result.stop(ctx, err)
 		}
 		if err := r.record("plan", func(s *taskState) error { s.Plan = steps; return nil }); err != nil {
 			return result, err
@@ -277,9 +326,12 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	}
 	text, err := e.runTask(ctx, r, session, system, reporter)
 	if err != nil {
-		return result.stop(parent, err)
+		return result.stop(ctx, err)
 	}
 	result.FinalText = text
+	if r.analysisEnabled() {
+		result.Analysis = r.analysisReport(ctx)
+	}
 	switch {
 	case r.state.Verification != nil && r.state.Verification.Passed:
 		result.Status, result.Reason = Verified, "指定验收已通过，工作区版本已核对"
@@ -291,22 +343,32 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	return result, nil
 }
 
-func (r RunResult) stop(parent context.Context, err error) (RunResult, error) {
+func (r RunResult) stop(ctx context.Context, err error) (RunResult, error) {
 	r.FinalText = ""
 	r.Reason = err.Error()
 	var limit budgetLimit
+	var readonlyStop readonlyRepeatStop
+	var networkError net.Error
 	switch {
 	case errors.Is(err, errStorage):
 		r.Status, r.StopCode = Failed, "storage_error"
 		return r, err
-	case errors.Is(parent.Err(), context.Canceled), errors.Is(err, context.Canceled):
+	case errors.Is(ctx.Err(), context.Canceled), errors.Is(err, context.Canceled):
 		r.Status, r.StopCode = Cancelled, "cancelled"
 	case errors.As(err, &limit):
 		r.Status, r.StopCode = BudgetExhausted, limit.code
 	case errors.Is(err, errBudget):
 		r.Status, r.StopCode = BudgetExhausted, "budget_exhausted"
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		r.Status, r.StopCode = BudgetExhausted, "deadline"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &networkError) && networkError.Timeout():
+		// 请求自身的超时不能证明任务累计时限已到达。
+		r.Status, r.StopCode = Failed, "request_timeout"
+		return r, err
+	case errors.As(err, &readonlyStop):
+		r.Status, r.StopCode = Blocked, "readonly_repeat"
+	case errors.Is(err, errAnalysisReportInvalid):
+		r.Status, r.StopCode = Blocked, "analysis_report_invalid"
 	case errors.Is(err, errContextBudget), errors.Is(err, errBlocked):
 		r.Status, r.StopCode = Blocked, "blocked"
 	default:
@@ -330,6 +392,10 @@ func (e *AgentEngine) runTask(ctx context.Context, r *runState, session *ctxpkg.
 		var err error
 		text, err = e.converse(ctx, r, session, system, e.registry, reporter, step.ID, step.Goal, 0)
 		if err != nil {
+			var readonlyStop readonlyRepeatStop
+			if errors.As(err, &readonlyStop) {
+				return text, err
+			}
 			if !errors.Is(err, errBlocked) || len(r.state.Pending) != 0 || patchUsed {
 				return text, err
 			}
@@ -386,16 +452,55 @@ func (e *AgentEngine) runTask(ctx context.Context, r *runState, session *ctxpkg.
 }
 
 func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.Message, defs []schema.ToolDefinition) (*schema.Message, error) {
-	snapshot := r.budgetSnapshot()
+	return e.generateRequest(ctx, r, msgs, defs, false)
+}
+
+// generateRequest 共享预算上下文、压缩、调用和观测。收尾使用原子准入而不是再次扣模型次数。
+func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []schema.Message, defs []schema.ToolDefinition, closing bool) (*schema.Message, error) {
+	snapshot := r.requestBudgetSnapshot(ctx)
 	if deadline, ok := ctx.Deadline(); ok {
 		snapshot.RemainingMS = min(snapshot.RemainingMS, max(int64(0), time.Until(deadline).Milliseconds()))
 	}
-	prepared, err := e.compactor.CompactWithin(withBudgetContext(msgs, snapshot), defs)
+	request := append([]schema.Message(nil), msgs...)
+	if block := r.readingContext(ctx); block != "" {
+		if len(request) > 0 && request[0].Role == schema.RoleSystem {
+			request[0].Content += "\n" + block
+		} else {
+			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+		}
+	}
+	if block := func() string {
+		if r.analysisEnabled() {
+			return ""
+		}
+		return r.readContext(ctx)
+	}(); block != "" {
+		if len(request) > 0 && request[0].Role == schema.RoleSystem {
+			request[0].Content += "\n\n" + block
+		} else {
+			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+		}
+	}
+	var prepared []schema.Message
+	var delivered []string
+	var stats analysisRequestStats
+	var err error
+	if r.analysisEnabled() {
+		prepared, delivered, stats, err = e.prepareAnalysisRequest(ctx, r, withBudgetContext(request, snapshot), defs)
+	} else {
+		prepared, err = e.compactor.CompactWithin(withBudgetContext(request, snapshot), defs)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w：%v", errContextBudget, err)
 	}
-	if err := r.reserve(ctx, "model"); err != nil {
-		return nil, err
+	if closing {
+		if err := r.reserveClosing(ctx); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := r.reserve(ctx, "model"); err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -414,7 +519,7 @@ func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.M
 		model = named.ModelName()
 	}
 	started := time.Now()
-	observe.Emit(callCtx, "model_started", observe.Payload{Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ToolCount: int64(len(defs))})
+	observe.Emit(callCtx, "model_started", observe.Payload{Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ToolCount: int64(len(defs)), SourceBytes: stats.source, AnalysisBytes: stats.notes, EvidenceBytes: stats.evidence, ActionBytes: stats.actions, SchemaBytes: stats.schema, FoldedReads: stats.folded, SoftTargetBytes: stats.target, SoftTargetExceeded: stats.over})
 	msg, err := e.provider.Generate(callCtx, prepared, defs)
 	errorClass := observationError(err)
 	if msg == nil && err == nil {
@@ -430,12 +535,17 @@ func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.M
 	if msg == nil {
 		return nil, errors.New("模型没有返回消息")
 	}
+	r.markAnalysisDelivered(ctx, delivered)
+	r.markReadExposure(ctx, prepared)
 	return msg, nil
 }
 
 func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg.Session, system schema.Message, registry tools.Registry, reporter Reporter, stepID, stepGoal string, subTurns int) (string, error) {
 	failures := make(map[string]int)
 	for turn := 0; ; turn++ {
+		if r.toolsExhausted() {
+			return "", toolLimit()
+		}
 		if subTurns > 0 {
 			if turn >= subTurns {
 				return "", fmt.Errorf("%w：子任务达到 %d 轮", errBlocked, subTurns)
@@ -445,14 +555,21 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 		}
 		prompt := system
 		if subTurns == 0 {
-			anchor, _ := json.Marshal(struct {
-				Goal     string   `json:"goal"`
-				Step     string   `json:"step,omitempty"`
-				Progress []string `json:"progress,omitempty"`
-			}{r.state.Spec.Goal, stepGoal, r.state.Progress})
-			prompt.Content += "\n\n当前任务（结构化数据）：" + string(anchor)
+			if r.analysisEnabled() || r.efficiencyEnabled() {
+				prompt.Content += r.analysisAnchor(stepGoal)
+			} else {
+				anchor, _ := json.Marshal(struct {
+					Goal     string   `json:"goal"`
+					Step     string   `json:"step,omitempty"`
+					Progress []string `json:"progress,omitempty"`
+				}{r.state.Spec.Goal, stepGoal, r.state.Progress})
+				prompt.Content += "\n\n当前任务（结构化数据）：" + string(anchor)
+			}
 		}
 		history := append([]schema.Message{prompt}, session.GetWorkingMemory(20)...)
+		if r.analysisEnabled() {
+			history = append([]schema.Message{prompt}, analysisHistory(session)...)
+		}
 		if subTurns == 0 && e.options.EnableThinking {
 			if reporter != nil {
 				reporter.OnThinking(ctx)
@@ -465,16 +582,26 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 				history = append(history, schema.Message{Role: schema.RoleAssistant, Content: thinking.Content, ResponseItems: thinking.ResponseItems})
 			}
 		}
-		msg, err := e.generate(ctx, r, history, registry.VisibleTools(ctx))
+		msg, err := e.generate(ctx, r, history, r.visibleTools(ctx, registry))
 		if err != nil {
 			return "", err
 		}
 		text := strings.TrimSpace(msg.Content)
+		var analysis *AnalysisReport
+		if r.analysisEnabled() && (text != "" || len(msg.ToolCalls) == 0) {
+			analysis, err = r.acceptAnalysis(ctx, text, len(msg.ToolCalls) == 0)
+			if err != nil {
+				return "", err
+			}
+		}
 		if len(msg.ToolCalls) == 0 {
 			if text == "" {
 				return "", fmt.Errorf("%w：模型没有交付内容", errBlocked)
 			}
 			session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ResponseItems: msg.ResponseItems})
+			if analysis != nil && subTurns == 0 {
+				return RenderAnalysis(*analysis), nil
+			}
 			return text, nil
 		}
 		seen := make(map[string]bool, len(msg.ToolCalls))
@@ -487,21 +614,43 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 		session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ToolCalls: msg.ToolCalls, ResponseItems: msg.ResponseItems})
 		results, batchErr := e.executeBatch(ctx, r, registry, reporter, msg.ToolCalls, stepID)
 		var observations []schema.Message
-		var stopped string
+		var stopped error
+		var boundaryErr error
+		var readonlyCandidates []ReadonlyFailureBoundary
 		for i, result := range results {
 			call := msg.ToolCalls[i]
 			content := observation(result)
 			if result.IsError {
 				content = e.recovery.AnalyzeAndInject(call.Name, content)
 			}
-			observations = append(observations, schema.Message{Role: schema.RoleUser, ToolCallID: call.ID, ToolStatus: result.Status, Content: content})
+			evidenceID := ""
+			if result.Read != nil {
+				evidenceID = result.Read.EvidenceID
+			}
+			readActionID := ""
+			if result.Read != nil {
+				readActionID = result.Read.ActionID
+			}
+			observations = append(observations, schema.Message{Role: schema.RoleUser, ToolCallID: call.ID, ToolStatus: result.Status, Content: content, ReadEvidenceID: evidenceID, ReadActionID: readActionID})
+			trackedReadonly := false
+			if subTurns == 0 {
+				boundary, trackErr := r.noteReadonlyResult(ctx, stepID, call, result)
+				if trackErr != nil {
+					boundaryErr = errors.Join(boundaryErr, trackErr)
+				} else if boundary != nil {
+					trackedReadonly = true
+					if boundary.Stopped {
+						readonlyCandidates = append(readonlyCandidates, *boundary)
+					}
+				}
+			}
 			key := actionKey(stepID, call)
 			if !result.IsError {
 				delete(failures, key)
 			} else {
 				failures[key]++
-				if failures[key] >= 3 {
-					stopped = fmt.Sprintf("工具 %s 以相同参数连续失败三次", call.Name)
+				if failures[key] >= 3 && stopped == nil && !trackedReadonly {
+					stopped = fmt.Errorf("%w：工具 %s 的同一请求已失败三次", errBlocked, call.Name)
 				}
 			}
 		}
@@ -509,14 +658,44 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 		if batchErr != nil {
 			return "", batchErr
 		}
-		if stopped != "" {
-			return "", fmt.Errorf("%w：%s", errBlocked, stopped)
+		if boundaryErr != nil {
+			return "", boundaryErr
+		}
+		for _, candidate := range readonlyCandidates {
+			if current := r.unresolvedReadonlyBoundary(candidate.ID); current != nil && stopped == nil {
+				stopped = readonlyRepeatStop{Boundary: *current}
+			}
+		}
+		if stopped != nil {
+			var readonlyStop readonlyRepeatStop
+			if errors.As(stopped, &readonlyStop) {
+				if err := r.record("readonly_failure", func(s *taskState) error {
+					if r.fatalStorage != nil {
+						return r.fatalStorage
+					}
+					s.ReadonlyStopID = readonlyStop.Boundary.ID
+					return nil
+				}); err != nil {
+					return "", err
+				}
+			}
+			return "", stopped
 		}
 	}
 }
 
 func observation(result schema.ToolResult) string {
 	header := fmt.Sprintf("执行状态：%s，效果：%s", result.Status, result.Effect)
+	if result.ErrorCode != "" {
+		header += "，错误码：" + result.ErrorCode
+	}
+	if result.Retryable != nil {
+		if *result.Retryable {
+			header += "，当前前提下可重试"
+		} else {
+			header += "，当前前提下同请求不应重试，请修正目标或跳过"
+		}
+	}
 	if result.ExitCode != nil {
 		header += fmt.Sprintf("，退出码：%d", *result.ExitCode)
 	}

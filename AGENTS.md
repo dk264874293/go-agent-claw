@@ -25,7 +25,7 @@ go run ./cmd/bench                 # 基准测试 runner（会真实调用 LLM A
 
 - **不要使用 `go build ./...`**：会因 `workspace/main.go` 是空草稿文件而失败。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
 - 测试：`go test ./cmd/... ./internal/...`。共享预算、账本、存储和审批改动用 `go test -race ./internal/...` 验证。
-- CLI、Bench 和独立飞书服务默认读取 `OPENAI_API_KEY`。Bench 显式指定 `-model glm-*` 时读取 `ZHIPU_API_KEY`，飞书服务配置见 README。
+- CLI、Bench 和独立飞书服务默认读取 `DEEPSEEK_API_KEY`，使用 `deepseek-v4.1-flash-1017`。自动选择 `gpt-*` 模型时读取 `OPENAI_API_KEY`，`glm-*` 读取 `ZHIPU_API_KEY`，飞书服务配置见 README。
 - REPL 内置斜杠命令：`/help` `/exit` `/cost` `/status` `/clear` `/verify` `/resume`。设置验收和清空对话在本地处理，`/resume` 恢复持久任务。输入独占一行的 `"""` 进入多行输入模式，再一行 `"""` 结束提交。
 
 ## 架构
@@ -61,8 +61,8 @@ internal/feishu/            — 群聊队列、去重、审批（cmd/agentops）
 - **并发工具执行**：连续的独立只读调用限量并发，写入和 Bash 作为顺序屏障。同一工作区由 taskstore 独占锁保护。
 - **包名怪癖**：`internal/eval/benchmark.go` 位于 `internal/eval/` 目录却声明 `package observability`。导入路径是 `internal/eval`，但引用时写作 `observability.*`（见 `cmd/bench/main.go`）。
 - **错误自愈**：工具报错会经过 `RecoveryManager.AnalyzeAndInject`，在模型看到输出前追加救援提示。
-- **模型入口**：CLI、Bench 和 AgentOps 默认用 `provider.NewOpenAIProvider(provider.DefaultOpenAIModel)`，默认模型为 `gpt-6.1-sol`。Bench 显式指定 `glm-*` 时使用智谱兼容 Provider。
-- **执行模式**：CLI 默认只读。工作区写入和可信本机命令须显式启用。子智能体只使用只读工具。
+- **模型入口**：CLI、Bench 和 AgentOps 通过 `provider.ResolveModelConfig` 与 `provider.NewConfiguredProvider` 选择模型和渠道，默认模型为 Deepseek 的 `deepseek-v4.1-flash-1017`。自动选择时 `deepseek*` 使用 Deepseek、`glm-*` 使用智谱，其余使用 OpenAI；显式 `-provider` 可覆盖渠道。真实对照评测继续显式使用 `gpt-6.1-sol`。
+- **执行模式**：CLI 默认 `workspace`，允许工作区内读写；可用 `-mode readonly` 显式只读，可信本机命令须用 `-mode trusted` 启用。子智能体只使用只读工具。
 - 引擎构造签名为 `NewAgentEngine(provider, registry, EngineOptions)`。通过 `Run(ctx, session, TaskSpec, reporter)` 执行，调用方从 `RunResult` 获取任务终态。
 
 ## 新增东西

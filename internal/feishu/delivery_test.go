@@ -30,6 +30,10 @@ func TestFinalReportUsesServiceContextAndSendsOnce(t *testing.T) {
 				if status == engine.Failed {
 					result.StopCode = "storage_error"
 				}
+				if status == engine.BudgetExhausted {
+					result.StopCode = "tool_limit"
+					result.PartialReport = &engine.PartialReport{Text: "已记录的分析结果", Source: "recorded", OriginRunID: "部分交付运行"}
+				}
 				cancel()
 				finished = true
 				return result, nil
@@ -55,6 +59,9 @@ func TestFinalReportUsesServiceContextAndSendsOnce(t *testing.T) {
 			}
 			if status == engine.Answered && strings.Count(sent[0], "实际最终答复") != 1 {
 				t.Fatalf("最终答复丢失：%v", sent)
+			}
+			if status == engine.BudgetExhausted && (strings.Count(sent[0], "已记录的分析结果") != 1 || !strings.Contains(sent[0], "部分分析／任务未完成") || !strings.Contains(sent[0], "tool_limit")) {
+				t.Fatalf("预算失败的部分分析未统一交付：%v", sent)
 			}
 		})
 	}

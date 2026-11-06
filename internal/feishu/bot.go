@@ -270,7 +270,7 @@ func (b *FeishuBot) execute(ctx context.Context, session *ctxpkg.Session, bindin
 		return
 	}
 
-	spec := engine.TaskSpec{Goal: msg.text, Mode: binding.Mode, VerifyCommand: binding.VerifyCommand, Kind: engine.TaskChange}
+	spec := engine.TaskSpec{Goal: msg.text, Mode: binding.Mode, VerifyCommand: binding.VerifyCommand, Kind: engine.TaskChange, Analysis: binding.Analysis, Delegation: binding.Delegation}
 	if binding.Mode == tools.ModeReadOnly {
 		spec.Kind = engine.TaskAnswer
 	}

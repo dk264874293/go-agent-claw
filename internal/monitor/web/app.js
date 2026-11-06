@@ -46,6 +46,10 @@ const eventLabels = {
   started: '任务执行开始', finished: '引擎结果已记录', action_started: '动作已登记',
   action_result: '动作结果', reconciled: '恢复核实', model: '模型预算准入', tool: '工具预算准入',
   turn: '开始一轮执行', elapsed: '累计计时', plan: '建立计划', plan_patch: '更新计划', step_done: '步骤完成',
+  budget_closing_started: '预算收尾已准入', budget_closing_finished: '预算收尾结果已记录',
+  readonly_failure: '只读探索失败已记录', readonly_failure_resolved: '只读探索失败边界已解除',
+  readonly_closing_started: '只读探索收尾已准入', readonly_closing_finished: '只读探索收尾结果已记录',
+  analysis_updated: '分析笔记已记录', analysis_update: '分析笔记已记录', analysis_evidence: '分析原文证据已记录',
 };
 
 function node(tag, className, text) {
@@ -221,11 +225,13 @@ function renderTask() {
   const facets = node('div', 'status-grid');
   const facet = (label, content, hint) => append(node('div', 'status-facet'), node('span', '', label), content, hint ? node('p', '', hint) : null);
   const latest = array(task.attempts)[0];
+  const delegationLabels = { auto: '自动准入', off: '关闭', on: '显式开启' };
   append(facets,
     facet('运行活动', badge(task.activity, activityLabels), latest?.status && latest.status !== task.engine_status ? '本次返回观察：' + (statusLabels[latest.status] || latest.status) : '最近观察：' + time(task.last_observed_at)),
     facet('引擎持久结果', badge(task.engine_status, statusLabels, '未见可靠终态'), task.stop_code ? '停止原因：' + task.stop_code : '持久状态与入口观察分别核对'),
     facet('交付与验收', task.kind === 'answer' && !task.verification ? node('span', 'badge', '问答任务，无修改验收') : badge(task.verification?.passed ? 'VERIFIED' : 'NEEDS_VERIFICATION', { VERIFIED: '历史验收通过', NEEDS_VERIFICATION: '尚无通过的引擎验收' }), array(task.effects).filter((e) => e.file).length + ' 条文件回执 · 外部评分见交付页'),
     facet('记录可靠性', badge(task.record_quality, qualityLabels), task.history_complete ? '结构化效果历史完整' : '效果历史有缺口，不代表没有修改'));
+  facets.append(facet('执行策略', node('span', 'badge', task.analysis_enabled ? '严格分析报告' : (task.kind === 'answer' ? '普通回答' : (task.kind === 'change' ? '修改任务' : '任务类型未知'))), '委派：' + (delegationLabels[task.delegation] || '历史未记录')));
   root.append(facets);
   if (array(task.alerts).length) {
     const summary = append(node('div', 'health-warning'), node('span', '', task.alerts.length + ' 条需要核实的提示 · '), button('查看异常证据', () => { state.tab = 'alerts'; renderTask(); }, 'button link-button'));
@@ -312,10 +318,13 @@ function renderEvents() {
     const content = node('div', 'event-content');
     const head = append(node('div', 'event-header'), node('strong', '', eventLabels[event.event_type] || event.event_type));
     if (p.tool) head.append(node('span', 'badge', p.tool)); if (p.status) head.append(badge(p.status)); if (p.effect) head.append(badge(p.effect));
+    if (p.stage === 'closing') head.append(node('span', 'badge', '禁工具收尾'));
+    if (p.source_kind?.startsWith('budget_closing_') || p.source_kind?.startsWith('readonly_')) head.append(node('span', 'badge', eventLabels[p.source_kind] || p.source_kind));
     content.append(head);
     const identity = [event.agent_id ? 'Agent ' + short(event.agent_id) : null, event.parent_agent_id ? '父 Agent ' + short(event.parent_agent_id) : null, event.action_id ? '动作 ' + short(event.action_id) : null, event.model_call_id ? '模型调用 ' + short(event.model_call_id) : null, known(p.duration_ms) ? duration(p.duration_ms) : null].filter(Boolean);
     if (identity.length) content.append(node('p', 'event-caption', identity.join(' · ')));
     if (p.summary || p.path || p.error_class || p.stop_code) content.append(node('p', 'event-caption', [p.summary, p.path, p.error_class, p.stop_code].filter(Boolean).join(' · ')));
+    if (p.report_id) content.append(node('p', 'event-caption', '子报告 ' + p.report_id + ' · 执行 ' + value(p.handoff_execution) + ' · 引用 ' + value(p.handoff_citations) + ' · 读取覆盖 ' + value(p.handoff_coverage) + ' · 运行验收 ' + value(p.handoff_verification) + '（各维度独立）'));
     const detail = node('details'); const key = state.attemptId + ':' + event.sequence;
     const summary = node('summary', '', '查看结构化记录'); summary.id = 'event-detail-' + event.sequence;
     detail.open = state.expandedEvents.has(key); detail.append(summary, node('pre', 'code-block', JSON.stringify(event, null, 2)));
@@ -327,7 +336,19 @@ function renderEvents() {
   restoreFocus(focused);
 }
 function renderDelivery(root, task) {
+  if (task.stop_code === 'storage_error') root.append(node('div', 'health-warning', '任务记录未可靠保存，以下仅为现场观察，不能作为已持久化证据。'));
+  if (task.partial_report?.text) {
+    const partial = task.partial_report;
+    const source = { model: '模型收尾汇总', recorded: '已记录事实摘要' }[partial.source] || '来源未知';
+    const sectionNode = section('部分分析／任务未完成', '部分分析不代表任务已完成或验收通过。停止原因：' + value(task.stop_code));
+    sectionNode.append(node('p', 'row-caption', '来源：' + source + (partial.origin_run_id ? ' · 来源运行：' + partial.origin_run_id : '')));
+    if (partial.origin_run_id && task.result_run_id && partial.origin_run_id !== task.result_run_id) sectionNode.append(node('p', 'inline-note', '此报告来自历史运行，文件当前状态须重新核实。'));
+    sectionNode.append(node('div', 'prose', partial.text));
+    root.append(sectionNode);
+  }
   const final = section('最终答复'); final.append(task.final_text ? node('div', 'prose', task.final_text) : node('p', 'inline-note', '没有可展示的最终答复。工具附带文字不作为终答。')); root.append(final);
+  renderAnalysis(root, task);
+  renderReading(root, task);
   const effects = section('动作效果回执', '回执记录动作当时或恢复核实时的效果，不代表文件当前仍存在或任务已验收。');
   if (!task.history_complete) effects.append(node('div', 'health-warning', '结构化效果历史不完整，不能据此认定此前没有修改。'));
   if (!array(task.effects).length) effects.append(node('p', 'inline-note', '没有可展示的效果回执。'));
@@ -349,6 +370,51 @@ function renderDelivery(root, task) {
   root.append(verification);
   const external = section('独立产物验收', '外部 oracle 的结果不会修改引擎终态。');
   if (array(task.evaluations).length) external.append(evaluationTable(task.evaluations)); else external.append(node('p', 'inline-note', '没有关联的外部评测记录。')); root.append(external);
+}
+function renderReading(root, task) {
+  const reading = task.reading;
+  const part = section('读取覆盖', '只说明这次发现清单在核对时的读取范围，不证明分析无遗漏或验收通过。');
+  if (!reading) { part.append(node('p', 'inline-note', '没有本次调用的结构化读取覆盖；历史缺失字段保持未知。')); root.append(part); return; }
+  const labels = { complete: '清单已完整读取', partial: '仍有未读区间', unknown: '范围或当前版本未知' };
+  part.append(badge(reading.status, labels), node('p', 'row-caption', '完整文件 ' + number(reading.complete_files) + ' / ' + number(reading.total_files) + (reading.manifest_id ? ' · 清单 ' + reading.manifest_id : ' · 未绑定完整发现清单')));
+  if (reading.recorded_only) part.append(node('p', 'health-warning', '这里只展示历史读取观察，当前文件版本未确认。'));
+  if (reading.discovery_incomplete) part.append(node('p', 'health-warning', '发现范围不完整，不能据此宣称全目录已读完。'));
+  const details = disclosure('reading-' + task.id); details.append(node('summary', '', '查看逐文件范围与缺口'));
+  for (const file of array(reading.files)) {
+    const row = node('article', 'evidence-row');
+    append(row, node('strong', '', file.path), node('p', 'row-caption', (file.complete ? '该版本已完整读取' : '该版本读取未确认完整') + ' · ' + number(file.read_bytes) + ' / ' + number(file.total_bytes) + ' 源字节 · 版本 ' + value(file.version)));
+    for (const gap of array(file.missing)) row.append(node('p', 'health-warning', '未读字节 [' + number(gap.start) + ', ' + number(gap.end) + ')，共 ' + number(Number(gap.end) - Number(gap.start)) + ' 字节'));
+    details.append(row);
+  }
+  part.append(details); root.append(part);
+}
+function renderAnalysis(root, task) {
+  const report = task.analysis;
+  if (!report) return;
+  const part = section('分析引用检查', '引用有效只证明原文位置、版本和读取依据；ANSWERED 表示报告已答复，不表示结论已经独立验收。');
+  const findings = array(report.findings); const unverified = array(report.unverified);
+  part.append(node('p', 'row-caption', '有依据的发现 ' + findings.length + ' 条 · 待核实 ' + unverified.length + ' 条'));
+  const details = disclosure('analysis-' + task.id);
+  details.append(node('summary', '', '查看逐条引用与限制'));
+  const labels = { fact: '材料事实', inference: '分析推断', recommendation: '建议', unverified: '待核实' };
+  for (const finding of findings) {
+    const row = node('article', 'evidence-row');
+    append(row, append(node('div', 'row-title'), node('strong', '', value(finding.id)), node('span', 'badge', labels[finding.kind] || value(finding.kind)), node('span', 'badge', finding.status === 'evidence_valid' ? '引用已核对' : '引用状态未知')), node('p', 'prose', finding.statement));
+    if (finding.context) row.append(node('p', 'row-caption', '背景与适用条件：' + finding.context));
+    if (array(finding.depends_on).length) row.append(node('p', 'row-caption', '依赖发现：' + finding.depends_on.join('、')));
+    if (finding.limitations) row.append(node('p', 'inline-note', '限制：' + finding.limitations));
+    for (const ref of array(finding.evidence)) {
+      const location = value(ref.path, '路径未知') + ':' + value(ref.start_line) + (ref.end_line !== ref.start_line ? '–' + value(ref.end_line) : '');
+      row.append(node('p', 'row-caption', value(ref.evidence_id) + ' · ' + location + ' · 版本 ' + value(ref.version)));
+      if (ref.quote) row.append(node('pre', 'code-block', ref.quote));
+      const evidence = array(task.evidence).find((item) => item.label === '工具证据 ' + ref.artifact_id || item.label === '分析原文 ' + ref.artifact_id);
+      if (ref.artifact_id && evidence) row.append(button('查看动作当时的原文', () => openEvidence(evidence.id), 'button link-button'));
+    }
+    details.append(row);
+  }
+  for (const item of unverified) details.append(node('p', 'health-warning', '待核实：' + item));
+  if (Number(report.unverified_dropped) > 0) details.append(node('p', 'health-warning', '另有 ' + number(report.unverified_dropped) + ' 项待核实未展开，存在记录缺口。'));
+  part.append(details); root.append(part);
 }
 function renderTraces(root, task) {
   root.append(node('p', 'inline-note', 'Trace 在运行收尾时导出。此处展示历史操作耗时；缺少 Trace 不表示任务失败。'));

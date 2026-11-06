@@ -40,7 +40,7 @@ func ScopeFromContext(ctx context.Context) ExecutionScope {
 
 func IsReadOnly(name string) bool {
 	switch name {
-	case "read_file", "list_dir", "search_text", "read_evidence":
+	case "read_file", "read_lines", "list_dir", "search_text", "read_evidence", "read_report", "find_files":
 		return true
 	}
 	return false

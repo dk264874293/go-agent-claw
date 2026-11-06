@@ -29,6 +29,16 @@ func (rm *RecoveryManager) AnalyzeAndInject(toolName string, rawError string) st
 	lowerError := strings.ToLower(rawError)
 
 	switch toolName {
+	case "list_dir":
+		if strings.Contains(rawError, "路径不是目录") || strings.Contains(lowerError, "not a directory") {
+			hint = "list_dir 只接受目录，列表中带 / 后缀的是目录；当前路径是文件或其上级路径不是目录，同参数重试不能解决。请跳过该目标继续处理已知文档，或按任务需要使用 read_file，不要重复列目录。"
+		}
+
+	case "read_evidence":
+		if strings.Contains(rawError, "证据读取范围无效") || strings.Contains(rawError, "UTF-8") || strings.Contains(rawError, "材料偏移量") {
+			hint = "证据按源字节分页：offset 必须非负，limit 为 1 至 4000（默认 4000）。请修正范围或字符边界，继续读取使用上一页返回的下一段 offset；不要对不同材料重复提交同类非法范围。"
+		}
+
 	case "edit_file":
 		// 匹配我们在 07 讲中手写的 fuzzyReplace 的固定报错抛出
 		if strings.Contains(rawError, "在文件中未找到 old_text") || strings.Contains(rawError, "找不到该代码片段") {
