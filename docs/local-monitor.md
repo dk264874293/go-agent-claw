@@ -62,10 +62,16 @@ CLAW_OBSERVE_DIR=/自定义观测目录 ./claw -dir /工作区 -prompt '任务'
 
 ## 页面与诊断
 
-- **任务**：按工作区、终态和关键词筛选，分页查看预算与活动。
-- **详情**：切换运行尝试，查看模型、工具、审批和子任务时间线及结构化详情；历史 Trace 按运行展示。
+- **总览**：默认首页。按当前工作区查看运行活动、等待审批、有提示任务、活动未知四项任务计数，以及最近 6 个任务和按提示数量优先排列的 6 个待核实任务；工作区健康异常同步展示。
+- **任务**：组合工作区、引擎结果、运行活动、关键词与“仅看有提示”筛选，按最近观察或提示数量排序，分页查看预算与活动。
+- **详情**：切换运行尝试，查看模型、工具、审批和子任务时间线及结构化详情；按 Agent 和事件类别筛选已加载事件，默认收起记账噪声，可选择显示全部事件；历史 Trace 按运行展示。
 - **交付与验收**：查看最终答复、效果账本、历史验收与外部评分，按需读取证据。
-- **异常与评测**：查看告警与事件位置、各批次逐例评分和失败标签。
+- **异常**：按任务分组分页，支持工作区、任务关键词与异常类别筛选；提示保留原始代码，可进入任务、定位事件或读取证据。
+- **评测**：随工作区切换数据，再按实验、分组和综合结果筛选样本，分别核对五维评分和失败标签。
+
+四项概览都按任务计数，覆盖当前工作区全部记录，不受任务列表分页影响。分类可以重叠：“等待审批”属于“运行活动”，“有提示任务”也可能正在运行。`active` 与 `finalizing` 计入运行活动；等待审批只读取最新非历史尝试的当前审批活动；`unknown` 仅表示活动未知；`returned` 与历史 `result_recorded` 分开展示。记录缺失不会被推算成执行成功或失败。
+
+工作区、视图、任务筛选与页码、任务 ID、运行尝试、详情标签及事件定位写入 URL 查询参数。刷新和浏览器前进、后退可恢复阅读入口，例如 `/?view=detail&task=<观测任务ID>&attempt=<尝试ID>&tab=timeline&event=<事件序号>`。访问凭据仍通过启动地址的 fragment 兑换，登录后移除，不写入这些查询参数。实时更新保留阅读位置与展开内容，出现新增事件时提供查看入口。
 
 初始告警阈值均为提示，不控制执行：
 
@@ -84,11 +90,39 @@ CLAW_OBSERVE_DIR=/自定义观测目录 ./claw -dir /工作区 -prompt '任务'
 
 ## HTTP 与访问边界
 
-读取接口为 `/api/v1/workspaces`、`/tasks`、`/tasks/{id}`、`/attempts/{id}/events`、`/evidence/{id}`、`/evaluations` 与 `/stream`。列表默认每页 50 条，上限 200；时间线每页最多 200 条。
+读取接口均位于 `/api/v1/`：`workspaces`、`overview`、`tasks`、`tasks/{id}`、`alerts`、`attempts/{id}/events`、`evidence/{id}`、`evaluations` 与 `stream`。
+
+| 接口 | 查询参数与返回 |
+| --- | --- |
+| `GET /overview` | 可选 `workspace`；同一索引快照返回 `revision`、全量任务 `total`、`counts`、`recent`、`attention`、`workspaces`。`counts` 字段为 `running/approval/alerts/unknown`；`recent` 和 `attention` 最多各 6 个轻量任务，后者按全部提示数量降序再按最近观察排序。 |
+| `GET /tasks` | 保留 `workspace/status/q/page/page_size`，新增 `activity_group/has_alerts/sort/view`。默认 `items` 仍为完整 Task，`view=summary` 改为轻量 TaskSummary；响应保留 `total/page/page_size`。 |
+| `GET /alerts` | 支持 `workspace/q/category/page/page_size`；按匹配任务分页返回 `items: [{task, alerts}]`，`task` 为 TaskSummary。`total` 是全量匹配任务数，`alert_total` 是全量匹配提示条数；每条提示保留原始字段并增加 `category`。 |
+| `GET /evaluations` | 可选 `workspace`；返回该工作区的 `items`，未指定时返回全部评测。 |
+
+`q` 不区分大小写，匹配任务目标与原始任务 ID；异常搜索也采用同一任务搜索口径。`status` 匹配原始引擎结果。任务列表新增参数如下：
+
+- `activity_group`：`running/approval/unknown/returned/recorded`，含义同页面活动分类；留空为全部，未知值无匹配。
+- `has_alerts`：仅 `true` 和 `false` 生效，分别筛选有提示或无提示的任务；省略或其他值不增加该条件。
+- `sort`：`alerts` 按提示数量降序，其他值及省略使用最近观察时间降序；相同时间用任务 ID 升序兜底，缺少时间的任务排在最后。
+- `view`：仅 `summary` 切换轻量返回，其他值沿用原始完整 Task，`tasks/{id}` 继续返回完整详情。
+
+TaskSummary 字段为 `id/workspace_id/task_id/goal/mode/kind/activity/activity_groups/engine_status/stop_code/record_quality/last_observed_at/budget/usage/alert_count`，不包含答复正文、结构化报告、历史尝试、效果明细或证据正文。`activity_groups` 可以同时包含 `running` 和 `approval`；`alert_count` 为任务全部提示数，异常页 `alerts` 则只包含当前类别匹配的提示。
+
+任务详情可选 `local_checks` 展示局部确定性核对的身份、结果、前提和来源位置；这些是动作当时的记录，不能证明当前文件、自然语言结论或运行验收通过。完整检查输入和回执不枚举或经证据API提供。普通读取策略3只开放已提交的来源材料和可信产物，索引落后时不猜测新材料类别；通用受限材料保留CLI读取入口。构建并重启观测台后生效，详见[来源复用与局部核对](source-reuse-v1.md)。
+
+异常 `category` 接受 `budget/unknown/repeat/slow/activity/record`，依次表示预算、未知效果、重复探索、调用耗时、活动未知、记录异常；留空为全部，未知值无匹配。未匹配其他类别的代码归入记录异常，原始 `code` 不被分类结果替代。
+
+任务与异常分页默认每页 50 个任务，上限 200；页码下限 1、上限 1,000,000，数字越界时截到边界，无法解析时使用默认值。超出结果范围返回空 `items`，保留全量总数。时间线每页最多 200 条事件。概览统计与异常总数均在分页前计算，不需要浏览器遍历所有任务页。
 
 服务校验本机来源、Host 与同源 API 请求，不开放 CORS。唯一的 POST 是 `/api/v1/session` 会话兑换，使用 HttpOnly、SameSite=Strict Cookie。静态首页允许从外部启动器导航，但不包含任务数据。出站 JSON 统一脱敏，不向浏览器提供源路径读取接口；证据 ID 由服务端映射，越界符号链接和非普通文件被拒绝。
 
 SSE 只发送视图变化通知；断线使用监测实例 ID 与序号续接。最多保留 1024 条通知，过期或跨实例游标触发 reset，页面重新获取视图。慢客户端不能阻塞执行。
+
+### 模型请求诊断
+
+新运行的时间线可展示 SDK 实际序列化后的参数白名单、渠道及协议、HTTP 错误、服务请求 ID 和前次成功调用的结构差异。未发送、null、零值、false 和未知分别显示；差异清单不完整时明确标注。旧记录不补造参数。
+
+本地清单及诊断 ID 独立于工具证据，页面没有正文读取或下载接口。默认 `metadata` 只保存参数清单；显式 `on_error` 的失败正文仍只存本机独立目录。诊断丢失单独提示，不改变引擎结果。启用方式、配额和清理规则见 [请求诊断 v1](request-diagnostics-v1.md)。
 
 ## 保留与清理
 
@@ -106,6 +140,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/real_eval/run.py selfcheck
 CLAW_MONITOR_EVAL_FIXTURE=/绝对路径/v2批次 go test ./internal/monitor -run TestRealEvaluationImport -v
 CLAW_MONITOR_PERF=1 go test ./internal/monitor -run TestLargeIndexPerformance -v
 CLAW_MONITOR_PERF_ACCEPTANCE=1 go test ./internal/monitor -run TestPerformanceAcceptance -v
+node --check internal/monitor/web/app.js
+# 仅开发时的离线 DOM 回归；复用已有 jsdom，不引入运行时依赖
+MONITOR_UI_JSDOM=/绝对路径/jsdom node --test scripts/monitor_ui_test.cjs
 ```
 
-测试使用脚本 Provider、故障注入和已有真实评测结果，不新增付费模型请求。完整 HTTP 性能验收包含认证、脱敏、编码、分页及一秒索引刷新，不将纯内存查询代替接口耗时。验收结论见 [2026-11-05 验证记录](local-monitor-results-2026-11-05.md)，原始日志与浏览器截图保存在项目本地 `.claw/monitor-validation/`。
+测试使用脚本 Provider、故障注入和已有真实评测结果，不新增付费模型请求。完整 HTTP 性能验收包含认证、脱敏、编码、分页及一秒索引刷新，并覆盖概览、轻量任务列表和异常分页，不将纯内存查询代替接口耗时。基础验收见 [2026-11-05 验证记录](local-monitor-results-2026-11-05.md)，本轮界面与查询优化见 [2026-11-06 验证记录](local-monitor-ui-results-2026-11-06.md)。

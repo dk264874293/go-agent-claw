@@ -42,12 +42,49 @@ type BaseTool interface {
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// ContextualDefinition 允许按同一次执行作用域描述真实可用的参数上限。
+type ContextualDefinition interface {
+	DefinitionFor(context.Context) schema.ToolDefinition
+}
+
 type Registry interface {
 	Register(tool BaseTool)
 	Use(mw MiddlewareFunc)
 	GetAvailableTools() []schema.ToolDefinition
 	VisibleTools(ctx context.Context) []schema.ToolDefinition
 	Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
+}
+
+// CallPreflight 仅校验注册、权限和工具参数，不执行Handler或中间件。
+// 用于批次调度判断；实际分发仍重新校验并运行原有中间件。
+type CallPreflight interface {
+	Preflight(context.Context, schema.ToolCall) *schema.ToolResult
+}
+
+func (r *registryImpl) Preflight(ctx context.Context, call schema.ToolCall) *schema.ToolResult {
+	var result schema.ToolResult
+	if err := ctx.Err(); err != nil {
+		result = cancelledBeforeExecution(call.ID, err)
+		return &result
+	}
+	r.mu.RLock()
+	tool, ok := r.tools[call.Name]
+	r.mu.RUnlock()
+	if !ok {
+		result = schema.NewToolResult(call.ID, fmt.Sprintf("未注册工具 %s", call.Name), schema.ToolRejected, schema.EffectNone, "未知工具", nil)
+		return &result
+	}
+	if err := requireTool(ctx, call.Name); err != nil {
+		result = schema.NewToolResult(call.ID, err.Error(), schema.ToolRejected, schema.EffectNone, "权限不足", nil)
+		return &result
+	}
+	if p, ok := tool.(toolPreflight); ok {
+		if err := p.validate(ctx, call.Arguments); err != nil {
+			result = toolErrorResult(ctx, call, "", nil, err)
+			return &result
+		}
+	}
+	return nil
 }
 
 type registryImpl struct {
@@ -91,7 +128,11 @@ func (r *registryImpl) VisibleTools(ctx context.Context) []schema.ToolDefinition
 	sort.Strings(names)
 	defs := make([]schema.ToolDefinition, 0, len(names))
 	for _, name := range names {
-		defs = append(defs, r.tools[name].Definition())
+		if tool, ok := r.tools[name].(ContextualDefinition); ok {
+			defs = append(defs, tool.DefinitionFor(ctx))
+		} else {
+			defs = append(defs, r.tools[name].Definition())
+		}
 	}
 	return defs
 }
@@ -111,6 +152,12 @@ func (e *executionError) Unwrap() error { return e.err }
 
 func reject(kind string, err error) error {
 	return &executionError{status: schema.ToolRejected, effect: schema.EffectNone, kind: kind, err: err}
+}
+
+// NewRejectedError 供跨包工具在尚未产生副作用时声明确定性拒绝。
+// 已进入实际写入后的未知效果不能使用此构造函数降级成 NONE。
+func NewRejectedError(kind, code string, err error) error {
+	return &executionError{status: schema.ToolRejected, effect: schema.EffectNone, kind: kind, code: code, err: err}
 }
 
 func decodeArgs(raw json.RawMessage, target any, required ...string) error {
@@ -152,6 +199,11 @@ type toolReadExecution interface {
 // toolReadSourceExecution 在回执之外传递原始源字节，避免从编号正文反推证据。
 type toolReadSourceExecution interface {
 	executeReadSource(context.Context, json.RawMessage) (string, *schema.ReadReceipt, []byte, error)
+}
+
+// ReadSourceExecutor 供跨包只读工具返回真实源字节及结构化回执；不解析展示文本。
+type ReadSourceExecutor interface {
+	ExecuteReadSource(context.Context, json.RawMessage) (string, *schema.ReadReceipt, []byte, error)
 }
 
 // toolDiscoveryExecution 直接传递有界发现回执，不从面向模型的路径清单解析规模。
@@ -225,8 +277,13 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 		}
 	}
 	stage = "persist_hook"
-	if hook, _ := ctx.Value(executionHookKey{}).(func(context.Context) error); hook != nil {
+	// 报告需先校验并冻结渲染字节，随后由 WriteReportFile 在真实写入前消费钩子。
+	if hook, _ := ctx.Value(executionHookKey{}).(func(context.Context) error); hook != nil && call.Name != "write_report" {
 		if err := hook(ctx); err != nil {
+			var rejected *executionError
+			if errors.As(err, &rejected) {
+				return toolErrorResult(ctx, call, "", nil, err)
+			}
 			return schema.NewToolResult(call.ID, err.Error(), schema.ToolRejected, schema.EffectNone, "执行前记录失败", nil)
 		}
 		// 分发钩子仅适用于本次调用。
@@ -248,6 +305,8 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	var err error
 	if finder, ok := tool.(toolDiscoveryExecution); ok {
 		output, discovery, err = finder.executeDiscovery(ctx, call.Arguments)
+	} else if reader, ok := tool.(ReadSourceExecutor); ok {
+		output, read, readContent, err = reader.ExecuteReadSource(ctx, call.Arguments)
 	} else if reader, ok := tool.(toolReadSourceExecution); ok {
 		output, read, readContent, err = reader.executeReadSource(ctx, call.Arguments)
 	} else if reader, ok := tool.(toolReadExecution); ok {
@@ -262,7 +321,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) (resul
 	}
 	effect := schema.EffectUnknown
 	switch call.Name {
-	case "edit_file", "write_file":
+	case "edit_file", "write_file", "write_report":
 		effect = schema.EffectConfirmed
 	case "spawn_subagent":
 		effect = schema.EffectNone

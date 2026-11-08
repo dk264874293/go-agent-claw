@@ -1,5 +1,15 @@
 # go-agent-claw
 
+普通任务可显式使用`-delivery-review on`，在首个交付边界按需处理重要命题、适用条件和已记录待办，并展示处理前后确认正文的字节比较；默认关闭、不隐式开启读取实验，不代表语义或运行验收。数值或明确JSON核对需另加`-local-checks on`；命名变量缺少绑定会给出结构化纠正提示，算术结果与分项解释分开。长篇缺少可定位引用、未展开别名和原文目录差异提供非阻断提示，不自动改写正文。笔记建议随已有工具响应小批增量提交，8KiB上限及安全折叠规则保持。配置、一次性额度及恢复边界见[交付前处理v1](docs/delivery-review-v1.md)，此前离线检查与真实实验停止情况见[验收记录](docs/delivery-review-results-2026-11-08.md)。
+
+独立读取实验 v2 已完成实现及一对真实验收：候选交付通过、语义质量未达标，实验能力继续默认关闭。结果、原始消耗及审查限制见[实施与验收记录](docs/read-features-results-2026-11-07.md)。
+
+普通新任务默认恢复读取策略2。来源视图、局部核对及结论提示由三个显式实验开关控制，任一开启使用策略4；见[独立读取实验v2](docs/read-features-v2.md)。历史来源复用策略3说明见[来源复用v1](docs/source-reuse-v1.md)。已有工作笔记 v3可通过现有读写工具的 `_work_notes` 参数提交增量笔记，继续采用软约束及有依据的正文折叠；递归发现优先，普通汇总核对明显的数值、默认值与版本矛盾。兼容、评测与边界见 [工作笔记与汇总效率](docs/work-notes-efficiency-v3.md)。
+
+笔记采纳与交付修复：首次完整交付的原文即进入本响应候选目录，普通摘要无需 `findings`；按模型响应统计采纳，已确认产物的链接由回执生成。原答复与业务JSON保留，说明及双样本验收见 [笔记采纳与交付准确性](docs/notes-delivery-v1.md)。
+
+任务覆盖与效率 v2：支持重复 `-read-scope`、`-read-name-glob`、`-require-full-read` 和 `-output-style concise|detailed`。显式完整要求才增加交付门槛；普通片段阅读保留。范围、恢复兼容与独立对照说明见 [覆盖与上下文效率](docs/coverage-efficiency-v2.md)。
+
 go-agent-claw 是用 Go 编写的 ReAct 编码助手。模型提出工具调用，引擎管理执行权限、预算、任务进度与验收。支持 CLI、离线回归、真实模型评测和独立的飞书入口。
 
 ## 快速开始
@@ -51,6 +61,8 @@ go build -o claw ./cmd/claw
 ./claw -dir ./workspace -mode readonly -prompt "阅读代码并总结入口"
 ./claw -dir ./workspace -mode readonly -analysis -prompt "分析 Markdown 文档，引用具体原文并区分事实与推断"
 ./claw -dir ./workspace -prompt "修复 README 中的错别字"
+./claw -dir ./workspace -read-page-bytes 16000 -prompt "读取并整理资料"
+./claw -dir ./workspace -report 优化汇总.md -prompt "汇总优化建议，不修改原始资料"
 ./claw -dir ./workspace -mode trusted -plan -prompt "修复解析器并验证" -verify 'go test ./internal/parser'
 ```
 
@@ -65,6 +77,12 @@ go build -o claw ./cmd/claw
 留空 `-prompt` 进入 REPL。支持 `/help`、`/exit`、`/cost`、`/status`、`/clear`、`/verify <命令>` 和 `/resume <任务 ID>`。独占一行的三个双引号开始或提交多行输入。`/verify` 设置下一次提交的验收命令。修改任务缺少验收时返回 `NEEDS_VERIFICATION`，验收命令成功且工作区版本一致时返回 `VERIFIED`。
 
 `-max-turns`、`-max-model-calls`、`-max-tool-calls`、`-timeout` 默认分别为 30、60、120、10 分钟。主任务与子任务共享调用次数和时间。使用 `-help` 查看全部参数。
+
+模型请求默认记录有界参数和输入来源元数据，不保存正文。需要排查新失败时，可在本次启动显式加入 `-request-diagnostics on_error`，把失败请求和同组上一成功请求的脱敏副本仅保存到本地 `~/.claw/request-diagnostics/`；`-request-diagnostics off` 可关闭。环境变量、限额、错误分类和清理方式见 [请求诊断说明](docs/request-diagnostics-v1.md)。观测台只展示摘要，不提供正文读取；历史未记录的请求不能补造。
+
+新任务默认启用有来源的读取记忆：普通写入也能获得读取覆盖、可核对笔记和带目的复核。`-read-page-bytes` 可选择 `8000`（默认）或 `16000`，同时控制读取默认页长、最大源字节及编号正文上限；它不增加调用额度或上下文硬上限。恢复沿用持久档位，历史任务不自动升级读取资格。
+
+`-report <相对路径.md>` 显式启用证据报告，仅支持 `workspace + change`。目标父目录必须存在，目标文件不能已存在；该任务只允许读取和 `write_report`，不能修改原始资料。模型提交结构化报告，引擎检查引用并统一渲染、写入和交付，不再追加模型复述。引用通过不代表结论正确，成功发布仍为 `NEEDS_VERIFICATION`。配置、恢复及测试边界见 [写入任务效率与证据报告](docs/write-efficiency-v1.md)。
 
 ## 任务状态与恢复
 
@@ -155,3 +173,9 @@ go build -o claw-monitor ./cmd/claw-monitor
 新建 `readonly + answer` 默认使用 `-delegation auto`：小范围材料由根 Agent 执行；可显式设为 `off` 或 `on`。严格引用报告仍由 `-analysis` 单独启用。新增 `read_lines`、带目的复核、引擎计算读取覆盖，以及完整 JSON 的子报告目录和按发现读取。
 
 启动方式、32 文件/128 KiB 阈值、子任务局部预算及验证边界见 [只读任务执行效率 v2](docs/readonly-efficiency-v2.md)。
+
+## 显式质量核验
+
+`-quality` 默认关闭，首版仅与 `-mode readonly -analysis` 或 `-mode workspace -report 报告.md` 组合。重要发现先登记证据票据，进行受限算术／明确 JSON 核验，按风险最多复核一次，再由根 Agent 修订／提交一次；全部计入原预算。普通任务保持原行为，内部通过不代表独立语义或运行验收。
+
+接口、状态版本 2、恢复与隐私边界及 CLI／观测台同步更新和重启说明见 [质量优先 v1](docs/quality-first-v1.md)。

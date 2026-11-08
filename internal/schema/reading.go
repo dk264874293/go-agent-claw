@@ -3,6 +3,11 @@ package schema
 // ReadingCoverage 只说明指定发现清单在核对时的读取范围，不证明分析或验收通过。
 type ReadingCoverage struct {
 	Status              string                `json:"status"`
+	ScopeKind           string                `json:"scope_kind,omitempty"`
+	ScopeID             string                `json:"scope_id,omitempty"`
+	ScopeRevision       string                `json:"scope_revision,omitempty"`
+	ManifestIDs         []string              `json:"manifest_ids,omitempty"`
+	UnresolvedPaths     []string              `json:"unresolved_paths,omitempty"`
 	ManifestID          string                `json:"manifest_id,omitempty"`
 	Files               []FileReadingCoverage `json:"files"`
 	CompleteFiles       int                   `json:"complete_files"`

@@ -372,13 +372,22 @@ func mutateFile(ctx context.Context, dir, name string, args json.RawMessage) (st
 }
 
 func commitFile(ctx context.Context, root *os.Root, mutation fileMutation) error {
+	return commitFileWithParents(ctx, root, mutation, true)
+}
+
+// 报告只允许在已有父目录中新建文件，不能随提交创建额外目录。
+func commitFileWithParents(ctx context.Context, root *os.Root, mutation fileMutation, createParents bool) error {
 	p := mutation.preview
 	parent := filepath.Dir(p.Path)
 	if err := checkPathLinks(root, p.Path, true); err != nil {
 		return err
 	}
-	if err := root.MkdirAll(parent, 0755); err != nil {
-		return rootError(err)
+	if createParents {
+		if err := root.MkdirAll(parent, 0755); err != nil {
+			return rootError(err)
+		}
+	} else if err := existingReportParent(root, parent); err != nil {
+		return err
 	}
 	tmp := filepath.Join(parent, ".claw-write-"+rand.Text())
 	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mutation.perm)

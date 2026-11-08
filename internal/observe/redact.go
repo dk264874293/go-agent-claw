@@ -75,6 +75,45 @@ func bounded(value string, n int) string {
 	return value
 }
 func cleanPayload(p Payload, secrets []string) Payload {
+	if p.DeliveryReview != nil {
+		copy := *p.DeliveryReview
+		copy.Status = bounded(redact(copy.Status, secrets), 64)
+		copy.AdmissionCount = max(0, copy.AdmissionCount)
+		copy.Documents = max(0, copy.Documents)
+		copy.Addressed = max(0, copy.Addressed)
+		copy.NotRelevant = max(0, copy.NotRelevant)
+		copy.Unverified = max(0, copy.Unverified)
+		copy.Undeclared = max(0, copy.Undeclared)
+		copy.ReadyToResolve = max(0, copy.ReadyToResolve)
+		copy.Unresolved = max(0, copy.Unresolved)
+		p.DeliveryReview = &copy
+	}
+	p.Request = cleanRequestSummary(p.Request, secrets)
+	if p.ReadFeatures != nil {
+		copy := *p.ReadFeatures
+		copy.Contract = bounded(redact(copy.Contract, secrets), 64)
+		p.ReadFeatures = &copy
+	}
+	for _, ref := range []**int64{&p.ByteStart, &p.ByteEnd, &p.DeliveryReviewPromptBytes, &p.FeaturePromptBytes, &p.ChecksRequested, &p.LocalCheckSchemaBytes, &p.SourceViewSchemaBytes} {
+		if *ref != nil {
+			value := **ref
+			if value < 0 {
+				*ref = nil
+			} else {
+				*ref = &value
+			}
+		}
+	}
+	p.UnprocessedReadCount = max(0, p.UnprocessedReadCount)
+	p.FoldedSourceBytes = max(0, p.FoldedSourceBytes)
+	p.OmittedNoteEntries = max(0, p.OmittedNoteEntries)
+	p.NotesAccepted, p.NotesRejected, p.NotesMissing = max(0, p.NotesAccepted), max(0, p.NotesRejected), max(0, p.NotesMissing)
+	p.NotesCarrierBytes = max(0, p.NotesCarrierBytes)
+	p.NotesMetadataRemovedBytes, p.NotesMetadataRetainedBytes = max(0, p.NotesMetadataRemovedBytes), max(0, p.NotesMetadataRetainedBytes)
+	p.NotesPreviouslyDelivered, p.NotesThisRequest = max(0, p.NotesPreviouslyDelivered), max(0, p.NotesThisRequest)
+	p.NotesCandidates = max(0, p.NotesCandidates)
+	p.NotesProcessedSources, p.NotesDeferredSources = max(0, p.NotesProcessedSources), max(0, p.NotesDeferredSources)
+	p.NotesSubmitted, p.NotesResponseRejected, p.NotesDuplicates = max(0, p.NotesSubmitted), max(0, p.NotesResponseRejected), max(0, p.NotesDuplicates)
 	v := reflect.ValueOf(&p).Elem()
 	for i := 0; i < v.NumField(); i++ {
 		if v.Field(i).Kind() == reflect.String {
@@ -86,6 +125,14 @@ func cleanPayload(p Payload, secrets []string) Payload {
 				limit = 1024
 			}
 			v.Field(i).SetString(bounded(redact(v.Field(i).String(), secrets), limit))
+		}
+	}
+	if p.EncodedRequestBytes != nil {
+		value := *p.EncodedRequestBytes
+		if value < 0 {
+			p.EncodedRequestBytes = nil
+		} else {
+			p.EncodedRequestBytes = &value
 		}
 	}
 	if p.InputTokens != nil {

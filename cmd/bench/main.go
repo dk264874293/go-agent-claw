@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/eval"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
 	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
@@ -17,7 +18,32 @@ import (
 func main() {
 	model := flag.String("model", provider.DefaultModel, "评测模型")
 	channelName := flag.String("provider", "auto", "模型渠道：auto、openai、zhipu、deepseek")
+	readPageBytes := flag.Int("read-page-bytes", 8000, "单次读取档位：8000 或 16000")
+	deliveryReview := flag.String("delivery-review", "off", "普通任务交付前处理：off（默认）、on；用例显式设置优先")
+	flag.String("source-views", "", "来源视图实验：off（默认）、on")
+	flag.String("local-checks", "", "局部核对实验：off（默认）、on")
+	flag.String("claim-focus", "", "短结论核对提示实验：off（默认）、on")
 	flag.Parse()
+	switches := map[string]string{}
+	deliveryReviewExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		deliveryReviewExplicit = deliveryReviewExplicit || f.Name == "delivery-review"
+		switch f.Name {
+		case "source-views", "local-checks", "claim-focus":
+			switches[strings.ReplaceAll(f.Name, "-", "_")] = f.Value.String()
+		}
+	})
+	features, featureErr := engine.ParseReadFeatureSwitches(switches)
+	if featureErr != nil {
+		log.Fatal(featureErr)
+	}
+	deliveryDefault, deliveryErr := benchmarkDeliveryReviewSwitch(*deliveryReview, deliveryReviewExplicit)
+	if deliveryErr != nil {
+		log.Fatal(deliveryErr)
+	}
+	if *readPageBytes != 8000 && *readPageBytes != 16000 {
+		log.Fatal("读取档位必须为 8000 或 16000 字节")
+	}
 	if err := runtimeenv.LoadDotenv(false); err != nil {
 		log.Fatal(err)
 	}
@@ -56,6 +82,16 @@ func main() {
 			TaskPrompt:     "为 math.go 中的 Multiply 创建 math_test.go，编写并运行名为 TestMultiply 的单元测试。保留 math.go。",
 			ValidateScript: `set -e; test -f math_test.go; output=$(go test -count=1 -v -run '^TestMultiply$' .); printf '%s\n' "$output"; printf '%s\n' "$output" | grep -E '^--- PASS: TestMultiply '`,
 		},
+	}
+	applyBenchmarkDeliveryReviewDefaults(testcases, deliveryDefault)
+	for i := range testcases {
+		if testcases[i].ReadFeatures == nil && features != nil {
+			copy := *features
+			testcases[i].ReadFeatures = &copy
+		}
+		if testcases[i].ReadPageBytes == 0 {
+			testcases[i].ReadPageBytes = *readPageBytes
+		}
 	}
 	ok := observability.NewBenchmarkRunner(*model, llm).RunSuite(ctx, testcases)
 	stop()

@@ -16,10 +16,14 @@ func NewReadLinesTool(workDir string) *ReadLinesTool {
 }
 func (*ReadLinesTool) Name() string { return "read_lines" }
 func (t *ReadLinesTool) Definition() schema.ToolDefinition {
-	return definition(t.Name(), "按源文件绝对行号精确读取，默认显示编号；起止行均包含。超过8KiB会截断，续读使用返回的字节offset交给read_file并保留line_numbers=true。", map[string]any{
+	return t.DefinitionFor(context.Background())
+}
+func (t *ReadLinesTool) DefinitionFor(ctx context.Context) schema.ToolDefinition {
+	pageBytes := ReadPageBytes(ctx)
+	return definition(t.Name(), fmt.Sprintf("按源文件绝对行号精确读取，默认显示编号；起止行均包含。超过%d字节会截断，续读使用返回的字节offset交给read_file并保留line_numbers=true。", pageBytes), map[string]any{
 		"path":         stringParam("工作区相对路径"),
 		"start_line":   intParam("起始行，从1开始", 1, 0),
-		"end_line":     intParam("结束行，不小于start_line；两端包含，仍受8KiB输出上限限制", 1, 0),
+		"end_line":     intParam(fmt.Sprintf("结束行，不小于start_line；两端包含，仍受%d字节输出上限限制", pageBytes), 1, 0),
 		"line_numbers": map[string]any{"type": "boolean", "description": "显示源文件绝对行号，默认true"},
 		"review":       readReviewParam(),
 	}, "path", "start_line", "end_line")

@@ -29,6 +29,11 @@ func testOpenAIResponsesToolRoundTrip(t *testing.T, model string) {
 		{"type":"message","id":"msg_first","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"我来读取文件。","annotations":[]}]},
 		{"type":"function_call","id":"fc_first","call_id":"call_read","status":"completed","name":"read_file","arguments":"{\"path\":\"test.txt\"}"}
 	]`
+	listDefinition := tools.NewListDirTool(t.TempDir()).Definition()
+	listWire, err := json.Marshal(map[string]any{"type": "function", "name": listDefinition.Name, "description": listDefinition.Description, "strict": false, "parameters": listDefinition.InputSchema})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		request := requests.Add(1)
@@ -60,7 +65,7 @@ func testOpenAIResponsesToolRoundTrip(t *testing.T, model string) {
 			t.Errorf("工具数为 %d，预期 2", len(body.Tools))
 		} else {
 			assertResponsesJSON(t, body.Tools[0], `{"type":"function","name":"read_file","description":"读取文件","strict":false,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["path"]}}`)
-			assertResponsesJSON(t, body.Tools[1], `{"type":"function","name":"list_dir","description":"列出工作区目录的直接子项；仅对目录调用，带 / 后缀的是目录，文件不能继续列目录。","strict":false,"parameters":{"type":"object","properties":{"path":{"type":"string","description":"工作区相对路径，默认 ."}},"additionalProperties":false}}`)
+			assertResponsesJSON(t, body.Tools[1], string(listWire))
 		}
 
 		expected := []string{
@@ -112,7 +117,7 @@ func testOpenAIResponsesToolRoundTrip(t *testing.T, model string) {
 			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": "integer"}},
 			"required": []string{"path"},
 		}},
-		tools.NewListDirTool(t.TempDir()).Definition(),
+		listDefinition,
 	}
 	first, err := p.Generate(context.Background(), msgs, defs)
 	if err != nil {

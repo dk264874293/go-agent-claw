@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "kind": "sanitized_real_nil_slice_shape",
+    "source_profile": "delivery_review_v1",
+    "preserved_failure_shape": "read_memory.notes[agent].findings=null",
+    "removed": "真实任务/Agent身份、路径、正文、API配置与运行数据，仅保留Go slice编码形状"
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "kind": "analysis_updated",
+      "payload": {
+        "version": 1,
+        "spec": {
+          "read_context_version": 4,
+          "read_features": {
+            "version": 1,
+            "source_views": false,
+            "local_checks": true,
+            "claim_focus": false
+          }
+        },
+        "read_memory": {
+          "version": 1,
+          "evidence": {},
+          "notes": {
+            "offline-root": {
+              "schema_version": 1,
+              "findings": null,
+              "processed_reads": null,
+              "deferred_reads": null,
+              "summaries": {
+                "E1": "只保留脱敏形状：该响应提交了来源摘要，没有findings。"
+              }
+            }
+          },
+          "source_reviews": null,
+          "invalidations": null
+        },
+        "local_checks": null,
+        "delivery_review": null
+      }
+    }
+  ],
+  "state": {
+    "version": 1,
+    "spec": {
+      "read_context_version": 4,
+      "read_features": {
+        "version": 1,
+        "source_views": false,
+        "local_checks": true,
+        "claim_focus": false
+      }
+    },
+    "read_memory": {
+      "version": 1,
+      "evidence": {},
+      "notes": {
+        "offline-root": {
+          "schema_version": 1,
+          "findings": null,
+          "processed_reads": null,
+          "deferred_reads": null,
+          "summaries": {
+            "E1": "只保留脱敏形状：该响应提交了来源摘要，没有findings。"
+          }
+        }
+      },
+      "source_reviews": null,
+      "invalidations": null
+    },
+    "local_checks": null,
+    "delivery_review": null
+  },
+  "expected": {
+    "source_findings": 0,
+    "mechanism_result": "not_achieved"
+  }
+}

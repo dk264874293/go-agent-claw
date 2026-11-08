@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "kind": "finite_labeled_semantic_oracle",
+  "source_task": "6fab055a7f97c1af02c9e5c635b7c6be",
+  "annotation": {
+    "method": "Codex逐行核对冻结原文后的有限固定标注",
+    "independent_human_review": false,
+    "course_code_executed": false
+  },
+  "matching": "只匹配完整已标注claim文本（忽略外层空白）；不按关键词猜测新结论。",
+  "limitations": [
+    "仅验证三个固定反例及明示claim，不承担通用自然语言语义判断。",
+    "未知表述返回not_run，不作为报告质量通过。",
+    "有效引用及JSON格式合法不等于结论成立。",
+    "固定标注回归不是模型质量或独立人工评审结果。"
+  ],
+  "sources": [
+    {
+      "id": "validator",
+      "path": "05资料包/md版/第 5 节 实操 1：编写 JSON 格式校验脚本.md",
+      "sha256": "cc1a7e3ba33457c8647101619376d547acc582f912cb3f034905f9f04684ad52",
+      "evidence": [
+        {
+          "id": "v2_boundary",
+          "start_line": 4,
+          "end_line": 4,
+          "quote": "从这里开始，你可以把第一周的内容复制到一个新目录，开始制作第二周升级版v2。本周目标实现自动化运营。",
+          "quote_sha256": "9d6f1076d42e84dff97529ad159559b70bfcb31258ec014ebf750e66d2b0d7e4"
+        },
+        {
+          "id": "status_enum",
+          "start_line": 81,
+          "end_line": 82,
+          "quote": "# 合法的 status 值\nVALID_STATUSES = {\"draft\", \"review\", \"published\", \"archived\"}",
+          "quote_sha256": "e1a7e6e7f6e6962fb326c14a0cc16fd32c13c5ecd4b11e93006ead4226851abc"
+        }
+      ]
+    },
+    {
+      "id": "quality",
+      "path": "05资料包/md版/第 5 节 实操 2：编写质量评分脚本.md",
+      "sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617",
+      "evidence": [
+        {
+          "id": "score_default",
+          "start_line": 164,
+          "end_line": 174,
+          "quote": "def score_tech_depth(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 2：技术深度（25 分）— 基于文章 score 字段（1-10 映射）。\"\"\"\n    max_score = 25.0\n    article_score = data.get(\"score\", 5)\n\n    if not isinstance(article_score, (int, float)):\n        return DimensionScore(\"技术深度\", 10, max_score, \"score 字段类型异常\")\n\n    mapped = (article_score / 10) * max_score\n    detail = f\"文章评分 {article_score}/10 → {mapped:.1f}/{max_score}\"\n    return DimensionScore(\"技术深度\", round(mapped, 1), max_score, detail)",
+          "quote_sha256": "560917496d6a1b4e630a458e36d8e368b452bc6b730a01d381f4555770f1c19f"
+        },
+        {
+          "id": "usage_commands",
+          "start_line": 48,
+          "end_line": 50,
+          "quote": "用法：\n    python hooks/check_quality.py knowledge/articles/github-20260317-001.json\n    python hooks/check_quality.py knowledge/articles/*.json",
+          "quote_sha256": "5ae7eaacf15613bc75839956d85478aaad56b9dee3918f54f0679ed801eb68cd"
+        },
+        {
+          "id": "test_commands",
+          "start_line": 377,
+          "end_line": 385,
+          "quote": "## 2.3 运行质量评分\n\n```plain\n# 逐个检查\npython hooks/check_quality.py knowledge/articles/test-quality-good.json\npython hooks/check_quality.py knowledge/articles/test-quality-bad.json\n\n# 批量检查（支持通配符）\npython hooks/check_quality.py knowledge/articles/*.json",
+          "quote_sha256": "1ebb673d4f2ad0f2d7793e94e68562682fa25ff711c24ac7ca49069151bddc58"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "v2_status_migration",
+      "description": "先识别V2边界，再判断状态枚举及迁移建议。",
+      "evidence_ids": [
+        "v2_boundary",
+        "status_enum"
+      ],
+      "claims": [
+        {
+          "id": "v2_status_supported",
+          "text": "第5节进入V2；其校验器允许draft、review、published、archived，不允许reviewed。",
+          "expected_result": "pass",
+          "reason": "V2声明与合法枚举均能在对应原文直接定位。"
+        },
+        {
+          "id": "v2_migration_requires_sync",
+          "text": "若继续使用该V2校验器，将review改成reviewed会被判为非法状态，需要同步迁移规则。",
+          "expected_result": "pass",
+          "reason": "review在当前枚举内，reviewed不在；迁移必须与目标校验规则保持一致。"
+        },
+        {
+          "id": "v2_wrong_status",
+          "text": "第5节V2校验器的合法状态是draft、reviewed、published，review必须改成reviewed。",
+          "expected_result": "fail",
+          "reason": "把V1口径套到V2，且遗漏archived。"
+        },
+        {
+          "id": "v2_review_invalid",
+          "text": "review在当前第5节V2校验器中非法，reviewed才合法。",
+          "expected_result": "fail",
+          "reason": "与当前V2合法枚举相反。"
+        }
+      ]
+    },
+    {
+      "id": "optional_score_default",
+      "description": "缺少顶层score时使用默认值，并保留迁移影响。",
+      "evidence_ids": [
+        "score_default"
+      ],
+      "derived_value": {
+        "description": "根据已标注代码常量进行静态算术核对，不执行课程代码。",
+        "default_score": 5,
+        "denominator": 10,
+        "max_score": 25,
+        "expected_mapped": 12.5
+      },
+      "claims": [
+        {
+          "id": "score_default_mapped",
+          "text": "当缺少顶层score时，技术深度函数会按默认5计算，映射为12.5/25，不因缺失该可选字段直接报错。",
+          "expected_result": "pass",
+          "reason": "data.get(\"score\",5)取5，通过数值类型判断后按5/10*25映射。"
+        },
+        {
+          "id": "score_migration_requires_sync",
+          "text": "把score迁移到analysis.relevance_score后，还必须同步修改现有评分读取逻辑，否则仍会使用默认5并产生12.5分的技术深度分。",
+          "expected_result": "pass",
+          "reason": "当前函数只读取顶层score；嵌套值不会自动被该读取替代。"
+        },
+        {
+          "id": "score_missing_raises",
+          "text": "缺少顶层score时，评分脚本会直接报错，无法生成质量评分。",
+          "expected_result": "fail",
+          "reason": "忽略.get的默认值；本函数不会仅因该字段缺失而报错。"
+        },
+        {
+          "id": "score_already_nested",
+          "text": "质量评分脚本已经从analysis.relevance_score读取分数，迁移后不必修改脚本。",
+          "expected_result": "fail",
+          "reason": "与当前读取路径data.get(\"score\",5)不一致。"
+        },
+        {
+          "id": "score_default_zero",
+          "text": "score字段缺失时技术深度必为0分。",
+          "expected_result": "fail",
+          "reason": "实际标注默认映射是12.5/25。"
+        }
+      ]
+    },
+    {
+      "id": "existing_test_commands",
+      "description": "已存在的python命令不能描述为缺失，也不能改写成原文python3。",
+      "evidence_ids": [
+        "usage_commands",
+        "test_commands"
+      ],
+      "claims": [
+        {
+          "id": "commands_exist",
+          "text": "质量评分文档已提供python hooks/check_quality.py的单条、批量及good/bad测试命令；这些是已有说明，不是缺失的测试入口。",
+          "expected_result": "pass",
+          "reason": "用法段与2.3运行段均有明确命令。"
+        },
+        {
+          "id": "command_spelling_and_runtime",
+          "text": "原文使用python命令，不是python3；是否在本机可运行仍需实测。",
+          "expected_result": "pass",
+          "reason": "只确认文档中的命令拼写，不外推当前本机运行效果。"
+        },
+        {
+          "id": "commands_missing",
+          "text": "原文没有任何check_quality.py测试命令，需要从零补充。",
+          "expected_result": "fail",
+          "reason": "忽略49-50及381-385行已有命令。"
+        },
+        {
+          "id": "commands_wrong_interpreter",
+          "text": "文档示例测试命令使用python3 hooks/check_quality.py。",
+          "expected_result": "fail",
+          "reason": "标注原文使用python，不能将同义推测当原文复述。"
+        }
+      ]
+    }
+  ]
+}

@@ -43,7 +43,7 @@ type observationSource struct {
 	err         string
 	gap         bool
 }
-type evidenceSource struct{ root, relative, label string }
+type evidenceSource struct{ root, relative, label, expectedVersion string }
 type Index struct {
 	mu           sync.RWMutex
 	config       Config
@@ -137,8 +137,24 @@ func validID(s string) bool {
 }
 func (x *Index) addEvidence(root, rel, label string) Evidence {
 	id := stableID(root + "\x00" + rel)
-	x.evidence[id] = evidenceSource{root, rel, label}
+	x.evidence[id] = evidenceSource{root: root, relative: rel, label: label}
 	return Evidence{id, observe.Redact(label)}
+}
+
+// taskArtifactsVisible 以当前持久任务策略限制材料访问，不根据可猜测的文件名分类。
+// 未取得有效状态时也不开放材料，避免质量事件提交之前的枚举窗口泄露复核正文。
+// 调用方持有索引锁。
+func (x *Index) taskArtifactsVisible(root, taskID string) bool {
+	source := x.sources[stableID(observe.WorkspaceID(root)+"/"+taskID)]
+	return source != nil && source.view.Sequence > 0 && source.view.Spec.Quality == nil
+}
+
+func (x *Index) evidenceVisible(src evidenceSource) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(src.relative)), "/")
+	if len(parts) == 5 && parts[0] == ".claw" && parts[1] == "tasks" && parts[3] == "artifacts" {
+		return x.taskArtifactsVisible(src.root, parts[2]) && x.localCheckArtifactVisible(src.root, parts[2], parts[4])
+	}
+	return true
 }
 func (x *Index) Refresh() bool {
 	x.mu.Lock()
@@ -219,6 +235,9 @@ func (x *Index) Refresh() bool {
 					p["status"] = act.Result.Status
 					p["effect"] = act.Result.Effect
 					p["summary"] = clip(observe.Redact(act.Result.Output), 800)
+					if act.Tool == "check_evidence" {
+						p["summary"] = "局部核对结果已记录；完整输入和回执保存在受限任务材料，仅展示结构化摘要"
+					}
 					if act.Tool == "spawn_subagent" {
 						var result struct {
 							Handoff *struct {
@@ -259,6 +278,39 @@ func (x *Index) Refresh() bool {
 			t := Task{ID: id, WorkspaceID: wid, TaskID: d.Name(), Goal: clip(observe.Redact(v.Spec.Goal), 4000), Mode: string(v.Spec.Mode), Kind: string(v.Spec.Kind), Activity: "unknown", RecordQuality: "historical_incomplete", Budget: Budget{v.Limits.MaxModelCalls, v.Limits.MaxToolCalls, v.Limits.MaxTurns, v.Limits.Timeout.Milliseconds()}, Usage: Usage{v.Usage.ModelCalls, v.Usage.ToolCalls, v.Usage.Turns, v.Usage.Elapsed.Milliseconds()}, Plan: append([]engine.InspectionStep(nil), v.Plan...), Attempts: append([]Attempt{}, s.attempts...), Effects: []engine.EffectReceipt{}, Alerts: []Alert{}, Evidence: []Evidence{}}
 			t.AnalysisEnabled = v.Spec.Analysis
 			t.Delegation = v.Spec.Delegation
+			t.ReadPageBytes = v.Spec.ReadPageBytes
+			t.ReadContextVersion = v.Spec.ReadContextVersion
+			if v.Spec.ReadFeatures != nil {
+				copy := *v.Spec.ReadFeatures
+				t.ReadFeatures = &copy
+			}
+			t.OutputStyle = v.Spec.OutputStyle
+			if v.Spec.ReadScope != nil {
+				copy := *v.Spec.ReadScope
+				copy.Paths = append([]string(nil), copy.Paths...)
+				for i := range copy.Paths {
+					copy.Paths[i] = observe.Redact(copy.Paths[i])
+				}
+				copy.NameGlob = observe.Redact(copy.NameGlob)
+				t.ReadScope = &copy
+			}
+			if t.ReadPageBytes == 0 {
+				t.ReadPageBytes = 8000
+			}
+			x.projectReadMemory(&t, v.ReadMemory)
+			x.projectDeliveryReview(&t, v.DeliveryReview)
+			x.projectLocalChecks(&t, v.LocalChecks)
+			if q := v.Quality; q != nil {
+				x.projectQuality(&t, &engine.QualityDelivery{Version: q.Version, DraftID: q.DraftID, Status: q.Status, CheckResult: q.CheckResult, ReviewStatus: q.ReviewStatus, RevisionStatus: q.RevisionStatus, Unresolved: q.Unresolved})
+			}
+			if v.Report != nil && v.Spec.Report != nil {
+				x.projectReport(&t, &engine.ReportDelivery{
+					ReportID: v.Report.ReportID, OriginRunID: v.Report.OriginRunID, Status: v.Report.Status,
+					TargetPath: v.Spec.Report.TargetPath, OutputVersion: v.Report.OutputVersion,
+					DraftArtifactID: v.Report.DraftArtifactID, RenderedArtifactID: v.Report.RenderedArtifactID,
+					ReferenceResult: v.Report.ReferenceResult, SemanticResult: v.Report.SemanticResult, Issues: v.Report.Issues,
+				})
+			}
 			for i := range t.Plan {
 				t.Plan[i].Goal = observe.Redact(t.Plan[i].Goal)
 			}
@@ -267,10 +319,31 @@ func (x *Index) Refresh() bool {
 				t.Effects = append(t.Effects, v.Delivery.Effects...)
 			}
 			if v.Result != nil {
+				if !v.Running {
+					x.projectDeliveryReview(&t, v.Result.DeliveryReview)
+				}
+				x.projectReport(&t, v.Result.Report)
+				x.projectQuality(&t, v.Result.Quality)
+				x.projectLocalChecks(&t, v.Result.LocalChecks)
+				for _, ref := range v.Result.Artifacts {
+					x.projectArtifact(&t, w.Path, ref)
+				}
 				if v.Result.Reading != nil {
 					raw, _ := json.Marshal(v.Result.Reading)
 					var reading engine.ReadingCoverage
 					if json.Unmarshal(raw, &reading) == nil {
+						if reading.ScopeKind == "" {
+							reading.ScopeKind = "legacy"
+						}
+						reading.ManifestID = observe.Redact(reading.ManifestID)
+						reading.ScopeID = observe.Redact(reading.ScopeID)
+						reading.ScopeRevision = observe.Redact(reading.ScopeRevision)
+						for i := range reading.ManifestIDs {
+							reading.ManifestIDs[i] = observe.Redact(reading.ManifestIDs[i])
+						}
+						for i := range reading.UnresolvedPaths {
+							reading.UnresolvedPaths[i] = observe.Redact(reading.UnresolvedPaths[i])
+						}
 						for i := range reading.Files {
 							reading.Files[i].Path = observe.Redact(reading.Files[i].Path)
 						}
@@ -305,6 +378,7 @@ func (x *Index) Refresh() bool {
 				t.StopCode = v.Result.StopCode
 				t.ResultRunID = v.Result.RunID
 				t.FinalText = observe.Redact(v.Result.FinalText)
+				t.FinalTextDisplay = observe.Redact(engine.DisplayRunFinalText(*v.Result))
 				if partial := v.Result.PartialReport; partial != nil {
 					copy := *partial
 					copy.Text = observe.Redact(copy.Text)
@@ -331,7 +405,7 @@ func (x *Index) Refresh() bool {
 			}
 			files, _ := readDir(w.Path, ".claw/tasks/"+d.Name()+"/artifacts")
 			for _, f := range files {
-				if validID(f.Name()) && !f.IsDir() {
+				if validID(f.Name()) && !f.IsDir() && x.taskArtifactsVisible(w.Path, d.Name()) && x.localCheckArtifactVisible(w.Path, d.Name(), f.Name()) {
 					t.Evidence = append(t.Evidence, x.addEvidence(w.Path, ".claw/tasks/"+d.Name()+"/artifacts/"+f.Name(), "工具证据 "+f.Name()))
 				}
 			}
@@ -497,6 +571,8 @@ func (s *observationSource) poll(root, rel, attempt string) {
 			s.err = "观测事件无法解码"
 			return
 		}
+		// 本地文件同样按白名单重新校验；历史或外部写入不能夹带正文及任意参数对象。
+		typed.Payload.Request = observe.SanitizeRequestSummary(typed.Payload.Request)
 		clean, _ := json.Marshal(typed)
 		var ev Event
 		if json.Unmarshal(clean, &ev) != nil || ev.RecordedAt == nil || ev.RecordedAt.IsZero() || ev.SchemaVersion != 1 || ev.AttemptID != attempt || ev.Sequence <= s.sequence || ev.EventType == "" || (ev.TaskID != "" && !validID(ev.TaskID)) {
@@ -541,6 +617,15 @@ func sanitizeMap(m map[string]any) {
 			m[k] = observe.Redact(v)
 		case map[string]any:
 			sanitizeMap(v)
+		case []any:
+			for i, item := range v {
+				switch item := item.(type) {
+				case string:
+					v[i] = observe.Redact(item)
+				case map[string]any:
+					sanitizeMap(item)
+				}
+			}
 		}
 	}
 }

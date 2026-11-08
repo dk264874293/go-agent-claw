@@ -46,6 +46,8 @@ type actionRecord struct {
 }
 
 type taskState struct {
+	DeliveryReview   *DeliveryReviewState                `json:"delivery_review,omitempty"`
+	ReadMemory       *ReadMemoryState                    `json:"read_memory,omitempty"`
 	Version          int                                 `json:"version"`
 	Spec             TaskSpec                            `json:"spec"`
 	SessionID        string                              `json:"session_id"`
@@ -65,31 +67,37 @@ type taskState struct {
 	ReadonlyClosings map[string]*ReadonlyClosing         `json:"readonly_closings,omitempty"`
 	ReadonlyStopID   string                              `json:"readonly_stop_id,omitempty"`
 	Analysis         *AnalysisState                      `json:"analysis,omitempty"`
+	Quality          *QualityState                       `json:"quality,omitempty"`
+	Report           *ReportState                        `json:"report,omitempty"`
 	Delegation       *DelegationState                    `json:"delegation,omitempty"`
 	Reading          *ReadingCoverage                    `json:"reading,omitempty"`
+	LocalChecks      []LocalCheckSummary                 `json:"local_checks,omitempty"`
 }
 
 type runState struct {
-	mu               sync.Mutex
-	state            taskState
-	started          time.Time
-	elapsed          time.Duration
-	persist          func(string, taskState) error
-	artifact         func(string, []byte) error
-	readArtifact     func(string, int, int) ([]byte, error)
-	readArtifactPage func(string, int, int) (taskstore.ArtifactPage, error)
-	runID            string
-	reads            readCatalog
-	fatalStorage     error
-	actionRefs       map[string]string
-	subSlots         chan struct{}
-	reportMu         sync.Mutex
-	resumeReceipts   map[string]schema.ToolResult
-	analysisRuntime  analysisRuntime
-	discoveries      []schema.DiscoveryReceipt
-	discoveryOwners  map[string]string
-	readReuse        readReuseRuntime
-	handoffs         handoffRuntime
+	mu                sync.Mutex
+	state             taskState
+	started           time.Time
+	elapsed           time.Duration
+	persist           func(string, taskState) error
+	artifact          func(string, []byte) error
+	readArtifact      func(string, int, int) ([]byte, error)
+	readArtifactPage  func(string, int, int) (taskstore.ArtifactPage, error)
+	runID             string
+	reads             readCatalog
+	fatalStorage      error
+	actionRefs        map[string]string
+	subSlots          chan struct{}
+	reportMu          sync.Mutex
+	resumeReceipts    map[string]schema.ToolResult
+	analysisRuntime   analysisRuntime
+	discoveries       []schema.DiscoveryReceipt
+	discoveryOwners   map[string]string
+	readReuse         readReuseRuntime
+	handoffs          handoffRuntime
+	historyStarts     map[string]int
+	historyBackground map[string]string
+	carriers          workNotesCarrierRuntime
 }
 
 func (r *runState) record(kind string, apply func(*taskState) error) error {

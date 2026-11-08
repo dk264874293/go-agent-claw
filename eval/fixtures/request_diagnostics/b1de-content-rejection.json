@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "case": "b1de_content_rejection_after_confirmed_write",
+  "limitations": "仅重建脱敏症状；历史完整请求和原始 HTTP 响应信封未留存，不能还原具体触发片段。",
+  "http_status": 400,
+  "reported_message": "Input text data may contain inappropriate content.",
+  "reported_type": "upstream_error",
+  "synthetic_envelopes": [
+    {"error": {"type": "upstream_error", "message": "Input text data may contain inappropriate content.", "param": null}},
+    {"type": "upstream_error", "message": "Input text data may contain inappropriate content.", "param": null}
+  ],
+  "expected": {
+    "status": "FAILED",
+    "stop_code": "model_content_rejected",
+    "exit_code": 1,
+    "model_calls": 2,
+    "tool_calls": 1,
+    "confirmed_artifacts": 1,
+    "automatic_retries": 0
+  }
+}

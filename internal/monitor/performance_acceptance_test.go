@@ -97,6 +97,50 @@ func TestPerformanceAcceptance(t *testing.T) {
 		}
 	})
 
+	for _, query := range []struct {
+		name string
+		path string
+	}{{"Overview", "/api/v1/overview"}, {"SummaryFirstPage", "/api/v1/tasks?view=summary&page_size=50"}, {"AlertsFirstPage", "/api/v1/alerts?page_size=50"}} {
+		t.Run(query.name, func(t *testing.T) {
+			latencies := make([]time.Duration, 0, 100)
+			for n := 0; n < 100; n++ {
+				req, err := http.NewRequest(http.MethodGet, httpServer.URL+query.path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.AddCookie(cookie)
+				start := time.Now()
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				latencies = append(latencies, time.Since(start))
+				if readErr != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("查询失败: status=%d read=%v", resp.StatusCode, readErr)
+				}
+				var result struct {
+					Total     int               `json:"total"`
+					Items     []json.RawMessage `json:"items"`
+					Recent    []json.RawMessage `json:"recent"`
+					Attention []json.RawMessage `json:"attention"`
+				}
+				if err := json.Unmarshal(body, &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Total != tasks || query.name == "Overview" && (len(result.Recent) != 6 || len(result.Attention) != 6) || query.name != "Overview" && len(result.Items) != 50 {
+					t.Fatalf("概览或分页遗漏任务: total=%d items=%d recent=%d attention=%d", result.Total, len(result.Items), len(result.Recent), len(result.Attention))
+				}
+			}
+			p95 := performanceP95(latencies)
+			t.Logf("认证 GET %s: 样本=%d P95=%s 最大=%s", query.path, len(latencies), p95, latencies[len(latencies)-1])
+			if p95 > 200*time.Millisecond {
+				t.Fatalf("查询 P95 超过 200 ms: %s", p95)
+			}
+		})
+	}
+
 	t.Run("RecordVisibility", func(t *testing.T) {
 		// 与正式服务一致：每秒 Refresh，视图变化后 Notify；轮询走真实认证接口。
 		stop, stopped := make(chan struct{}), make(chan struct{})

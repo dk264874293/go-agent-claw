@@ -200,11 +200,22 @@ func (a *Attempt) Returned(payload Payload) {
 
 // Close 仅等待有界刷新。卡住的磁盘不会无限拖住进程收尾。
 func (a *Attempt) Close() {
+	if a == nil {
+		return
+	}
+	a.CloseWithin(a.config.CloseTimeout)
+}
+
+// CloseWithin 允许入口与独立诊断写入共享退出刷新期限。
+func (a *Attempt) CloseWithin(timeout time.Duration) {
 	if a == nil || a.disabled {
 		return
 	}
 	a.closeOnce.Do(func() { a.stopClock(); a.mu.Lock(); a.closing = true; a.signal(); a.mu.Unlock() })
-	timer := time.NewTimer(a.config.CloseTimeout)
+	if timeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(min(timeout, a.config.CloseTimeout))
 	defer timer.Stop()
 	select {
 	case <-a.done:

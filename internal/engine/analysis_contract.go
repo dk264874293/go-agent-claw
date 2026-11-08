@@ -24,11 +24,27 @@ type AnalysisReport struct {
 	UnverifiedDropped int               `json:"unverified_dropped,omitempty"`
 	OverviewIDs       []string          `json:"overview_ids,omitempty"`
 	ProcessedReads    []string          `json:"processed_reads,omitempty"`
+	DeferredReads     []DeferredRead    `json:"deferred_reads,omitempty"`
 	Summaries         map[string]string `json:"summaries,omitempty"`
+}
+
+// DeferredRead 记录仍需处理的读取，不授予正文折叠或复读拒绝资格。
+type DeferredRead struct {
+	EvidenceID string             `json:"evidence_id"`
+	Reason     string             `json:"reason"`
+	WaitFor    *DeferredReadRange `json:"wait_for,omitempty"`
+}
+
+// DeferredReadRange 是源文件绝对字节的半开区间，仅描述等待材料，不授予处理资格。
+type DeferredReadRange struct {
+	ByteStart int64 `json:"byte_start"`
+	ByteEnd   int64 `json:"byte_end"`
 }
 
 type AnalysisFinding struct {
 	ScopeRequirement string             `json:"scope_requirement,omitempty"`
+	ScopeID          string             `json:"scope_id,omitempty"`
+	ScopeRevision    string             `json:"scope_revision,omitempty"`
 	ID               string             `json:"id"`
 	Kind             string             `json:"kind"`
 	Statement        string             `json:"statement"`
@@ -108,7 +124,7 @@ func checkAnalysisStructure(report AnalysisReport) error {
 	if report.UnverifiedDropped < 0 {
 		return errors.New("未展开待核实项计数不能为负数")
 	}
-	if len(report.Findings) > 64 || len(report.Unverified) > 192 || len(report.ProcessedReads) > 128 || len(report.Summaries) > 128 || len(report.OverviewIDs) > 64 {
+	if len(report.Findings) > 64 || len(report.Unverified) > 192 || len(report.ProcessedReads) > 128 || len(report.DeferredReads) > 128 || len(report.Summaries) > 128 || len(report.OverviewIDs) > 64 {
 		return errors.New("发现最多 64 条，待核实项最多 192 条，读取及摘要最多 128 条")
 	}
 	seen := make(map[string]bool)
@@ -138,6 +154,13 @@ func checkAnalysisStructure(report AnalysisReport) error {
 		if !analysisIDValid(id) || strings.TrimSpace(summary) == "" || len(summary) > 2000 {
 			return errors.New("摘要必须关联有效证据 ID，且非空、不超过 2000 字节")
 		}
+	}
+	deferredIDs := make(map[string]bool)
+	for _, read := range report.DeferredReads {
+		if !analysisIDValid(read.EvidenceID) || deferredIDs[read.EvidenceID] || strings.TrimSpace(read.Reason) == "" || len(read.Reason) > 2000 || !utf8.ValidString(read.Reason) {
+			return errors.New("暂缓读取须关联唯一有效证据 ID，理由非空且不超过 2000 字节")
+		}
+		deferredIDs[read.EvidenceID] = true
 	}
 	return nil
 }
@@ -248,6 +271,19 @@ func ValidateAnalysisReport(report AnalysisReport, lookup func(string) (Analysis
 		}
 	}
 	// 处理声明只有在证据可用且伴随有效发现或摘要时才能成为折叠候选。
+	// 单独保存摘要不等于已经处理，仍须显式 processed_reads 才能折叠。
+	for id, summary := range report.Summaries {
+		if lookup == nil {
+			continue
+		}
+		evidence, err := lookup(id)
+		if err == nil && evidence.ID == id && int64(len(evidence.Source)) == evidence.Receipt.ByteEnd-evidence.Receipt.ByteStart && utf8.Valid(evidence.Source) {
+			if result.Summaries == nil {
+				result.Summaries = make(map[string]string)
+			}
+			result.Summaries[id] = summary
+		}
+	}
 	for _, id := range uniqueAnalysisIDs(report.ProcessedReads) {
 		if lookup == nil {
 			continue
@@ -266,6 +302,15 @@ func ValidateAnalysisReport(report AnalysisReport, lookup func(string) (Analysis
 				result.Summaries = make(map[string]string)
 			}
 			result.Summaries[id] = summary
+		}
+	}
+	for _, read := range report.DeferredReads {
+		if lookup == nil {
+			continue
+		}
+		evidence, err := lookup(read.EvidenceID)
+		if err == nil && evidence.ID == read.EvidenceID && int64(len(evidence.Source)) == evidence.Receipt.ByteEnd-evidence.Receipt.ByteStart && utf8.Valid(evidence.Source) {
+			result.DeferredReads = append(result.DeferredReads, read)
 		}
 	}
 	if core == 0 {

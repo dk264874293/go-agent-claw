@@ -12,45 +12,80 @@
   <a class="skip-link" href="#main">跳到主要内容</a>
   <div class="app-shell">
     <aside class="sidebar" aria-label="应用导航">
-      <a class="brand" href="/" aria-label="Claw 任务观测台首页"><span class="brand-mark" aria-hidden="true">C</span><span><strong>Claw</strong><small>任务观测台</small></span></a>
+      <a class="brand" href="/" aria-label="Claw 任务观测台首页">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span><strong>Claw</strong><small>任务观测台</small></span>
+      </a>
       <div class="local-label"><span aria-hidden="true"></span>本机 · 只读</div>
       <nav aria-label="主要视图">
-        <button class="nav-item active" type="button" data-view="tasks" aria-current="page"><span aria-hidden="true">▤</span>任务</button>
-        <button class="nav-item" type="button" data-view="detail" disabled><span aria-hidden="true">↳</span>任务详情</button>
+        <button class="nav-item active" type="button" data-view="overview" aria-current="page"><span aria-hidden="true">◈</span>总览</button>
+        <button class="nav-item" type="button" data-view="tasks"><span aria-hidden="true">▤</span>任务</button>
         <button class="nav-item" type="button" data-view="alerts"><span aria-hidden="true">!</span>异常</button>
         <button class="nav-item" type="button" data-view="evaluations"><span aria-hidden="true">◫</span>评测</button>
       </nav>
-      <div class="sidebar-note"><strong>观察执行，核对证据</strong><p>任务由 CLI、飞书或 Bench 发起。此处只读取已登记的数据。</p></div>
-      <div class="connection" role="status" aria-live="polite"><span id="connection-dot" class="connection-dot"></span><span id="connection-text">尚未连接</span></div>
+      <div class="sidebar-note"><strong>观察执行，核对证据</strong><p>汇集 CLI、飞书与 Bench 的执行记录，沿着任务查看过程与结果。</p></div>
+      <div class="sidebar-footer">LOCAL OBSERVATORY <span>v1</span></div>
     </aside>
     <main id="main">
-      <header class="page-header">
-        <div><p class="eyebrow">LOCAL AGENT OBSERVATORY</p><h1 id="page-title">任务</h1><p id="page-subtitle" class="subtitle">查看执行进度、交付结果与记录状态。</p></div>
-        <button id="refresh" class="button secondary" type="button" aria-label="刷新当前视图">刷新</button>
-      </header>
+      <div class="topbar" aria-label="工作区与连接状态">
+        <label class="workspace-control" for="workspace-filter"><span>工作区</span><select id="workspace-filter"><option value="">全部工作区</option></select></label>
+        <div class="topbar-actions">
+          <div class="live-status">
+            <div class="connection" role="status" aria-live="polite"><span id="connection-dot" class="connection-dot"></span><span id="connection-text">尚未连接</span></div>
+            <span id="updated-at" class="updated-at"></span>
+          </div>
+          <button id="refresh" class="button secondary" type="button" aria-label="刷新当前视图"><span aria-hidden="true">↻</span> 刷新</button>
+        </div>
+      </div>
+      <header class="page-header"><div><p class="eyebrow">CLAW OBSERVATORY</p><h1 id="page-title">总览</h1><p id="page-subtitle" class="subtitle">了解当前活动，找到需要核实的任务。</p></div></header>
       <div id="notice" class="notice" role="alert" hidden></div>
+      <div id="workspace-health" aria-live="polite"></div>
       <section id="login" class="login-panel" aria-labelledby="login-title" hidden>
         <p class="eyebrow">本地访问验证</p><h2 id="login-title">连接任务观测台</h2><p>使用服务启动时打印的完整访问地址，或在下方输入访问凭据。</p>
         <form id="login-form"><label for="access-token">访问凭据</label><div class="login-controls"><input id="access-token" type="password" autocomplete="off" spellcheck="false" required><button class="button primary" type="submit">连接</button></div></form>
       </section>
-      <section id="view-tasks" class="view" aria-label="任务列表">
-        <form id="filters" class="filter-bar" role="search">
-          <label class="search-field">搜索任务<input id="search" type="search" placeholder="目标、任务 ID" autocomplete="off"></label>
-          <label>工作区<select id="workspace-filter"><option value="">全部工作区</option></select></label>
-          <label>引擎结果<select id="status-filter"><option value="">全部结果</option><option value="ANSWERED">已答复</option><option value="VERIFIED">验收通过</option><option value="NEEDS_VERIFICATION">待验收</option><option value="BUDGET_EXHAUSTED">预算耗尽</option><option value="BLOCKED">已阻塞</option><option value="CANCELLED">已取消</option><option value="FAILED">失败</option></select></label>
+      <section id="view-overview" class="view" aria-label="工作区总览">
+        <div class="section-heading overview-heading"><h2>工作区概况</h2><span id="overview-total" class="muted">正在读取…</span></div>
+        <div id="overview-summary" class="metric-grid" aria-live="polite"></div>
+        <p class="inline-note overview-note">按任务计数，分类可重叠。活动、引擎结果与验收分别记录。</p>
+        <div class="overview-grid">
+          <section class="overview-panel" aria-labelledby="recent-title"><div class="panel-heading"><div><h2 id="recent-title">最近任务</h2><p>按最近观察时间排列</p></div><span class="section-marker" aria-hidden="true">01</span></div><div id="overview-recent" class="summary-list" aria-live="polite"></div></section>
+          <section class="overview-panel" aria-labelledby="attention-title"><div class="panel-heading"><div><h2 id="attention-title">需要核实</h2><p>从提示进入任务，核对相关记录</p></div><span class="section-marker" aria-hidden="true">02</span></div><div id="overview-attention" class="summary-list" aria-live="polite"></div></section>
+        </div>
+      </section>
+      <section id="view-tasks" class="view" aria-label="任务列表" hidden>
+        <form id="filters" class="filter-bar filter-panel" role="search">
+          <label class="search-field" for="search">搜索任务<input id="search" type="search" placeholder="目标、任务 ID" autocomplete="off"></label>
+          <label for="activity-filter">运行活动<select id="activity-filter"><option value="">全部活动</option><option value="running">运行活动</option><option value="approval">等待审批</option><option value="unknown">活动未知</option><option value="returned">已返回</option><option value="recorded">结果已记录</option></select></label>
+          <label for="status-filter">引擎结果<select id="status-filter"><option value="">全部结果</option><option value="ANSWERED">已答复</option><option value="VERIFIED">验收通过</option><option value="NEEDS_VERIFICATION">待验收</option><option value="BUDGET_EXHAUSTED">预算耗尽</option><option value="BLOCKED">已阻塞</option><option value="CANCELLED">已取消</option><option value="FAILED">失败</option></select></label>
+          <label for="sort-filter">排序<select id="sort-filter"><option value="recent">最近观察</option><option value="alerts">提示数量</option></select></label>
+          <label class="checkbox-field" for="alerts-only"><input id="alerts-only" type="checkbox">仅看有提示</label>
+          <button id="clear-filters" class="button quiet" type="button">重置筛选</button>
         </form>
-        <div id="workspace-health"></div>
         <div class="section-heading"><h2>任务记录</h2><span id="task-count" class="muted">正在读取…</span></div>
         <div id="task-list" class="task-list" aria-live="polite"></div>
         <div class="pagination"><span id="page-summary" class="muted"></span><div><button id="previous-page" class="button secondary" type="button">上一页</button><button id="next-page" class="button secondary" type="button">下一页</button></div></div>
       </section>
-      <section id="view-detail" class="view" aria-label="任务详情" hidden><div id="task-detail"></div></section>
+      <section id="view-detail" class="view" aria-label="任务详情" hidden><button id="back-tasks" class="button back-button" type="button"><span aria-hidden="true">←</span> 返回任务列表</button><div id="task-detail"></div></section>
       <section id="view-alerts" class="view" aria-label="异常记录" hidden>
-        <div class="filter-bar"><label>异常类型<select id="alert-filter"><option value="">全部异常</option><option value="budget">预算</option><option value="unknown">未知效果</option><option value="repeat">重复探索</option><option value="slow">调用耗时</option><option value="activity">活动未知</option><option value="record">记录异常</option></select></label></div>
-        <div id="alert-list" aria-live="polite"></div>
+        <div class="filter-bar filter-panel" role="search">
+          <label class="search-field" for="alert-search">搜索任务<input id="alert-search" type="search" placeholder="目标、任务 ID" autocomplete="off"></label>
+          <label for="alert-filter">异常类型<select id="alert-filter"><option value="">全部异常</option><option value="budget">预算</option><option value="unknown">未知效果</option><option value="repeat">重复探索</option><option value="slow">调用耗时</option><option value="activity">活动未知</option><option value="record">记录异常</option></select></label>
+        </div>
+        <div class="section-heading"><h2>异常记录</h2><span id="alert-count" class="muted">正在读取…</span></div>
+        <div id="alert-list" class="alert-list" aria-live="polite"></div>
+        <div class="pagination"><span id="alert-summary" class="muted"></span><div><button id="alert-previous" class="button secondary" type="button">上一页</button><button id="alert-next" class="button secondary" type="button">下一页</button></div></div>
       </section>
-      <section id="view-evaluations" class="view" aria-label="评测结果" hidden><div id="evaluation-list" aria-live="polite"></div></section>
-      <footer class="footer">记录描述动作当时的观察；文件效果、引擎终态与独立验收分别核对。<span id="updated-at"></span></footer>
+      <section id="view-evaluations" class="view" aria-label="评测结果" hidden>
+        <div class="filter-bar filter-panel" role="search">
+          <label class="experiment-field" for="evaluation-experiment">实验<select id="evaluation-experiment"><option value="">全部实验</option></select></label>
+          <label for="evaluation-arm">实验分组<select id="evaluation-arm"><option value="">全部分组</option></select></label>
+          <label for="evaluation-result">综合结果<select id="evaluation-result"><option value="">全部结果</option><option value="pass">通过</option><option value="fail">未通过</option><option value="error">读取错误</option></select></label>
+        </div>
+        <div class="section-heading"><h2>评测样本</h2><span id="evaluation-count" class="muted">正在读取…</span></div>
+        <div id="evaluation-list" aria-live="polite"></div>
+      </section>
+      <footer class="footer"><span>记录描述动作当时的观察；文件效果、引擎终态与独立验收分别核对。</span><span>Claw · 本机只读观测</span></footer>
     </main>
   </div>
 </body>

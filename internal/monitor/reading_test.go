@@ -56,6 +56,55 @@ func TestReadingProjectionKeepsCoverageSeparateAndRedactsPaths(t *testing.T) {
 	if len(task.Reading.Files) != 1 || strings.Contains(task.Reading.Files[0].Path, secret) || !strings.Contains(task.Reading.Files[0].Path, "[REDACTED]") || task.Reading.Files[0].Missing[0].End-task.Reading.Files[0].Missing[0].Start != 353 {
 		t.Fatal("缺口错算或路径没有脱敏")
 	}
+	if task.Reading.ScopeKind != "legacy" || task.ReadScope != nil || task.OutputStyle != "" {
+		t.Fatalf("为旧记录补造了任务来源或输出选择: %+v", task)
+	}
+}
+
+func TestDeclaredReadingProjectionRetainsPolicyAndScopeIdentity(t *testing.T) {
+	work, id := t.TempDir(), strings.Repeat("e", 32)
+	secret := "source-policy-credential-123456789"
+	t.Setenv("MONITOR_SOURCE_POLICY_API_KEY", secret)
+	readingFixture(t, work, id, secret)
+	path := filepath.Join(work, ".claw/tasks", id, "events.jsonl")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev taskstore.Event
+	var state map[string]any
+	_ = json.Unmarshal(before, &ev)
+	_ = json.Unmarshal(ev.Payload, &state)
+	spec := state["spec"].(map[string]any)
+	spec["output_style"] = "detailed"
+	spec["read_scope"] = map[string]any{"version": 1, "paths": []string{"docs/" + secret}, "name_glob": "*.md", "require_complete": true}
+	reading := state["last_result"].(map[string]any)["reading"].(map[string]any)
+	reading["scope_kind"], reading["scope_id"], reading["scope_revision"] = "declared", "scope-1", "revision-1"
+	reading["manifest_ids"] = []string{"first", "second"}
+	reading["unresolved_paths"] = []string{"docs/" + secret}
+	ev.Payload, _ = json.Marshal(state)
+	raw, _ := json.Marshal(ev)
+	raw = append(raw, '\n')
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	x, err := NewIndex(Config{Workspaces: []string{work}, ObserveDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
+	task := x.Tasks("", "", "")[0]
+	if task.ReadScope == nil || !task.ReadScope.RequireComplete || task.OutputStyle != "detailed" || task.Reading == nil || task.Reading.ScopeKind != "declared" || task.Reading.ScopeID != "scope-1" || task.Reading.ScopeRevision != "revision-1" || len(task.Reading.ManifestIDs) != 2 {
+		t.Fatalf("来源身份或读取策略丢失: %+v", task)
+	}
+	projected, _ := json.Marshal(task)
+	if strings.Contains(string(projected), secret) || !strings.Contains(task.ReadScope.Paths[0], "[REDACTED]") || !strings.Contains(task.Reading.UnresolvedPaths[0], "[REDACTED]") {
+		t.Fatalf("资料配置或未解析目录泄漏凭据: %s", projected)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(raw) {
+		t.Fatal("投影修改了原始事件")
+	}
 }
 
 func TestReadingProjectionDoesNotReuseOldAttempt(t *testing.T) {

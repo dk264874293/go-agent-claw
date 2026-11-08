@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "score_anchors": {
+    "coverage": {
+      "0": "缺少主要课程段或多篇核心主题",
+      "1": "部分核心主题概览缺失",
+      "2": "覆盖五课程段及全部文档核心主题；细节遗漏不机械重复扣此项"
+    },
+    "citation": {
+      "0": "关键断言无依据或错文件",
+      "1": "位置可定位但部分重要断言仅宽泛引用或支撑不足",
+      "2": "重要结论均有正确就地来源，比较两端位置和支持范围明确"
+    },
+    "correctness": {
+      "0": "存在重大事实或数值错误",
+      "1": "有可证伪的普通事实错误",
+      "2": "已陈述结论无确认事实错误"
+    },
+    "conditions": {
+      "0": "重大版本/默认/范围或运行边界混淆",
+      "1": "局部条件不充分或未经支持的确定性推断",
+      "2": "版本、默认值、否定范围与静态/运行边界充分"
+    },
+    "important_findings": {
+      "0": "主要问题识别不足",
+      "1": "发现部分重要问题但仍有量表遗漏",
+      "2": "冻结必须审查项均充分处理，无重要遗漏"
+    }
+  },
+  "severity_rules": {
+    "major": "将静态推断冒充已执行通过、核心数值/默认/版本结论错误，或遗漏rubric severity_policy明确major的重要问题；必须绑定真实finding及来源",
+    "ordinary": "局部可证伪细节或次要遗漏，不满足major规则；tags已存在却称不存在至少ordinary",
+    "none": "被来源支持的发现；安全标注待核实且未冒充确定事实"
+  },
+  "review_protocol": {
+    "same_reviewer": true,
+    "same_method": true,
+    "method_options": [
+      "source_audit_agent",
+      "human"
+    ],
+    "reverse_order_check": true,
+    "unknown_verdict_is_pass": false,
+    "all_rubrics_required": true
+  },
+  "limitations": "固定量表约束评审流程，不能用结构校验替代语义审查；AI来源审查不冒充独立人工。"
+}

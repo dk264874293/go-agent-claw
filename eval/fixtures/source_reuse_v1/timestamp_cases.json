@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "kind": "finite_source_reuse_timestamp_cases",
+  "annotation": {
+    "method": "source_audit_agent",
+    "independent_human_review": false,
+    "scripts_executed": false,
+    "provider_calls": 0
+  },
+  "subjects": [
+    {
+      "id": "quality_sample_good",
+      "path": "05资料包/md版/第 5 节 实操 2：编写质量评分脚本.md",
+      "source_sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617",
+      "start_line": 348,
+      "end_line": 357,
+      "raw_json": "{\n  \"id\": \"github-20260310-001\",\n  \"title\": \"OpenCode — 开源 AI 编程终端\",\n  \"source_url\": \"https://github.com/nicepkg/opencode\",\n  \"summary\": \"开源 AI 编程终端工具，MIT 协议，支持 100+ 模型直连，基于 Go 语言的 agent 框架，支持 LLM 推理和 RAG 检索\",\n  \"tags\": [\"agent\", \"tool-use\", \"code-generation\"],\n  \"status\": \"review\",\n  \"score\": 9,\n  \"collected_at\": \"2026-03-10T08:00:00Z\"\n}",
+      "sha256": "9d0f746b0624a1c980eb1c1172c048b0e39f82d5182bfb8195ea57756c67a2e1"
+    },
+    {
+      "id": "quality_sample_bad",
+      "path": "05资料包/md版/第 5 节 实操 2：编写质量评分脚本.md",
+      "source_sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617",
+      "start_line": 363,
+      "end_line": 368,
+      "raw_json": "{\n  \"id\": \"bad\",\n  \"title\": \"一个赋能全链路的革命性的项目\",\n  \"summary\": \"底层逻辑打通闭环\",\n  \"status\": \"review\"\n}",
+      "sha256": "6166bad786f04f2681ba0819fabb68bd6f70f61aebd5f563f7b6bf7d93da8c11"
+    }
+  ],
+  "cases": [
+    {
+      "id": "good_collected",
+      "subject_id": "quality_sample_good",
+      "pointer": "/collected_at",
+      "expected_exists": true
+    },
+    {
+      "id": "good_updated_missing",
+      "subject_id": "quality_sample_good",
+      "pointer": "/updated_at",
+      "expected_exists": false
+    },
+    {
+      "id": "bad_collected_missing",
+      "subject_id": "quality_sample_bad",
+      "pointer": "/collected_at",
+      "expected_exists": false
+    }
+  ]
+}

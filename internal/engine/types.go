@@ -73,15 +73,23 @@ type EngineOptions struct {
 
 // TaskSpec 由调用方提供。恢复时读取原目标、验收命令和规划设置。
 type TaskSpec struct {
-	ID            string     `json:"id"`
-	Goal          string     `json:"goal"`
-	Kind          TaskKind   `json:"kind"`
-	Mode          tools.Mode `json:"mode"`
-	VerifyCommand string     `json:"verify_command,omitempty"`
-	Plan          bool       `json:"plan"`
-	Analysis      bool       `json:"analysis,omitempty"`
-	Delegation    string     `json:"delegation,omitempty"`
-	Resume        bool       `json:"-"`
+	DeliveryReview     *DeliveryReviewSpec `json:"delivery_review,omitempty"`
+	ReadContextVersion int                 `json:"read_context_version,omitempty"`
+	ReadFeatures       *ReadFeatureSpec    `json:"read_features,omitempty"`
+	ReadPageBytes      int                 `json:"read_page_bytes,omitempty"`
+	ReadScope          *ReadScopeSpec      `json:"read_scope,omitempty"`
+	OutputStyle        string              `json:"output_style,omitempty"`
+	ID                 string              `json:"id"`
+	Goal               string              `json:"goal"`
+	Kind               TaskKind            `json:"kind"`
+	Mode               tools.Mode          `json:"mode"`
+	VerifyCommand      string              `json:"verify_command,omitempty"`
+	Plan               bool                `json:"plan"`
+	Analysis           bool                `json:"analysis,omitempty"`
+	Delegation         string              `json:"delegation,omitempty"`
+	Report             *ReportSpec         `json:"report,omitempty"`
+	Quality            *QualitySpec        `json:"quality,omitempty"`
+	Resume             bool                `json:"-"`
 }
 
 type Verification struct {
@@ -118,18 +126,23 @@ type PartialReport struct {
 }
 
 type RunResult struct {
-	TaskID        string           `json:"task_id"`
-	RunID         string           `json:"run_id"`
-	Status        TaskStatus       `json:"status"`
-	StopCode      string           `json:"stop_code,omitempty"`
-	Reason        string           `json:"reason"`
-	FinalText     string           `json:"final_text,omitempty"`
-	PartialReport *PartialReport   `json:"partial_report,omitempty"`
-	Analysis      *AnalysisReport  `json:"analysis,omitempty"`
-	Reading       *ReadingCoverage `json:"reading,omitempty"`
-	Delivery      *Delivery        `json:"delivery,omitempty"`
-	Verification  *Verification    `json:"verification,omitempty"`
-	Usage         Usage            `json:"usage"`
+	DeliveryReview *DeliveryReviewSummary `json:"delivery_review,omitempty"`
+	TaskID         string                 `json:"task_id"`
+	RunID          string                 `json:"run_id"`
+	Status         TaskStatus             `json:"status"`
+	StopCode       string                 `json:"stop_code,omitempty"`
+	Reason         string                 `json:"reason"`
+	FinalText      string                 `json:"final_text,omitempty"`
+	PartialReport  *PartialReport         `json:"partial_report,omitempty"`
+	Analysis       *AnalysisReport        `json:"analysis,omitempty"`
+	Reading        *ReadingCoverage       `json:"reading,omitempty"`
+	Delivery       *Delivery              `json:"delivery,omitempty"`
+	Report         *ReportDelivery        `json:"report,omitempty"`
+	Quality        *QualityDelivery       `json:"quality,omitempty"`
+	LocalChecks    []LocalCheckSummary    `json:"local_checks,omitempty"`
+	Artifacts      []ArtifactRef          `json:"artifacts,omitempty"`
+	Verification   *Verification          `json:"verification,omitempty"`
+	Usage          Usage                  `json:"usage"`
 }
 
 func (r RunResult) ExitCode() int {

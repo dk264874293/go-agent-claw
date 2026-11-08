@@ -40,6 +40,11 @@ type Message struct {
 	ReadEvidenceID string `json:"-"`
 	// ReadActionID 在普通读取与分析读取间统一定位观察，避免跨轮复用 ToolCallID 串联来源。
 	ReadActionID string `json:"-"`
+	// RequestRepresentation 只用于诊断来源映射，不编码进请求或原始历史。
+	RequestRepresentation string `json:"-"`
+	// SourceModelCallID 与 NotesCandidateCount 只供引擎关联本次响应的观测，不发送给 Provider 或持久历史。
+	SourceModelCallID   string `json:"-"`
+	NotesCandidateCount int64  `json:"-"`
 	//是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
 	Usage *Usage `json:"usage,omitempty"`
 }
@@ -71,17 +76,18 @@ const (
 
 // ToolResult 分别记录工具执行状态和效果是否已知。
 type ToolResult struct {
-	ToolCallID string            `json:"tool_call_id"`
-	Output     string            `json:"output"`
-	Status     ToolStatus        `json:"status"`
-	Effect     EffectStatus      `json:"effect"`
-	ErrorKind  string            `json:"error_kind,omitempty"`
-	ErrorCode  string            `json:"error_code,omitempty"`
-	Retryable  *bool             `json:"retryable,omitempty"`
-	ExitCode   *int              `json:"exit_code,omitempty"`
-	IsError    bool              `json:"is_error"`
-	Read       *ReadReceipt      `json:"read,omitempty"`
-	Discovery  *DiscoveryReceipt `json:"discovery,omitempty"`
+	ToolCallID    string            `json:"tool_call_id"`
+	Output        string            `json:"output"`
+	Status        ToolStatus        `json:"status"`
+	Effect        EffectStatus      `json:"effect"`
+	ErrorKind     string            `json:"error_kind,omitempty"`
+	ErrorCode     string            `json:"error_code,omitempty"`
+	Retryable     *bool             `json:"retryable,omitempty"`
+	ExitCode      *int              `json:"exit_code,omitempty"`
+	IsError       bool              `json:"is_error"`
+	Read          *ReadReceipt      `json:"read,omitempty"`
+	Discovery     *DiscoveryReceipt `json:"discovery,omitempty"`
+	ContentReview *ContentReview    `json:"content_review,omitempty"`
 	// ReadContent 只在执行进程内传递实际交付的源字节，由引擎按需保存为不可变证据。
 	ReadContent []byte `json:"-"`
 }
@@ -98,8 +104,27 @@ type ReadReceipt struct {
 	AgentID    string      `json:"agent_id,omitempty"`
 	ActionID   string      `json:"action_id,omitempty"`
 	EvidenceID string      `json:"evidence_id,omitempty"`
+	FileRef    string      `json:"file_ref,omitempty"`
 	ArtifactID string      `json:"artifact_id,omitempty"`
 	Review     *ReadReview `json:"review,omitempty"`
+	// LineBoundary来自读取实现；历史记录缺失时不能推测半行是完整原文。
+	LineBoundary *ReadBoundary `json:"line_boundary,omitempty"`
+	// SourceView 指向原始读取材料的不可变切片，不继承原证据的处理或交付资格。
+	SourceView *SourceView `json:"source_view,omitempty"`
+}
+
+// SourceView 的材料偏移量与源文件字节范围分别记录，不从输出文字推导。
+type SourceView struct {
+	OriginEvidenceID string `json:"origin_evidence_id"`
+	OriginActionID   string `json:"origin_action_id"`
+	ArtifactID       string `json:"artifact_id"`
+	ArtifactStart    int64  `json:"artifact_start"`
+	ArtifactEnd      int64  `json:"artifact_end"`
+}
+
+type ReadBoundary struct {
+	StartsLine bool `json:"starts_line"`
+	EndsLine   bool `json:"ends_line"`
 }
 
 // ReadReview 只描述复核目标；引擎校验目标是否属于当前任务及是否仍可用。

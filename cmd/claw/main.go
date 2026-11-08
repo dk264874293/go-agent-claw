@@ -18,6 +18,7 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
+	"github.com/dk264874293/go-agent-claw/internal/requestdiag"
 	"github.com/dk264874293/go-agent-claw/internal/runtimeenv"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
@@ -36,16 +37,42 @@ func runCLI() int {
 	resume := flag.String("resume", "", "恢复指定任务 ID")
 	plan := flag.Bool("plan", false, "使用有依赖的结构化计划")
 	analysis := flag.Bool("analysis", false, "显式启用带证据引用的只读分析报告；恢复沿用原任务设置")
+	quality := flag.Bool("quality", false, "显式启用质量核验，仅支持 -analysis 或 -report；最多一次风险复核及一次作者修订")
+	deliveryReview := flag.String("delivery-review", "off", "普通任务交付前处理：off（默认）、on；最多一次强制退回，不代表质量验收")
 	delegation := flag.String("delegation", "", "只读回答的委派策略：auto、off、on；默认auto，恢复沿用原任务设置")
+	readPageBytes := flag.Int("read-page-bytes", 8000, "单次读取档位：8000 或 16000；恢复沿用持久配置")
+	flag.String("source-views", "", "普通任务来源视图实验：off（默认）、on；恢复沿用原配置")
+	flag.String("local-checks", "", "普通任务局部核对实验：off（默认）、on；不增加专用模型阶段")
+	flag.String("claim-focus", "", "普通任务短结论核对提示：off（默认）、on；不启用语义发布门禁")
+	var readScopes readScopeFlags
+	flag.Var(&readScopes, "read-scope", "声明资料的工作区相对文件或目录，可重复；不扩大读取权限")
+	readNameGlob := flag.String("read-name-glob", "*", "声明目录的文件基本名过滤，例如 *.md；须同时指定 -read-scope")
+	requireFullRead := flag.Bool("require-full-read", false, "声明范围须完整读取后才能交付；须同时指定 -read-scope")
+	outputStyle := flag.String("output-style", "concise", "报告文字和终答篇幅：concise 或 detailed；不截断证据或代码")
+	reportPath := flag.String("report", "", "生成有证据引用的 Markdown 新报告，仅 workspace + change")
 	thinking := flag.Bool("thinking", false, "每轮先执行一次无工具推理")
 	maxTurns := flag.Int("max-turns", 0, "主任务最多轮数，默认 30")
 	maxModels := flag.Int("max-model-calls", 0, "最多模型调用次数，默认 60")
 	maxTools := flag.Int("max-tool-calls", 0, "最多工具尝试次数，默认 120")
 	timeout := flag.Duration("timeout", 0, "累计运行时限，默认 10m")
 	contextBytes := flag.Int("context-bytes", 300000, "请求材料字节上限")
+	requestDiagnostics := flag.String("request-diagnostics", "", "请求诊断：off、metadata（默认）、on_error（失败时保存本地脱敏正文）")
+	requestDiagnosticsDir := flag.String("request-diagnostics-dir", "", "本地请求诊断目录；正文不通过观测台提供")
 	flag.Parse()
-	modelExplicit := false
-	flag.Visit(func(f *flag.Flag) { modelExplicit = modelExplicit || f.Name == "model" })
+	modelExplicit, readPageExplicit, readGlobExplicit, fullReadExplicit, styleExplicit, deliveryReviewExplicit := false, false, false, false, false, false
+	readFeatureSwitches := map[string]string{}
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "source-views", "local-checks", "claim-focus":
+			readFeatureSwitches[strings.ReplaceAll(f.Name, "-", "_")] = f.Value.String()
+		}
+		modelExplicit = modelExplicit || f.Name == "model"
+		readPageExplicit = readPageExplicit || f.Name == "read-page-bytes"
+		readGlobExplicit = readGlobExplicit || f.Name == "read-name-glob"
+		fullReadExplicit = fullReadExplicit || f.Name == "require-full-read"
+		styleExplicit = styleExplicit || f.Name == "output-style"
+		deliveryReviewExplicit = deliveryReviewExplicit || f.Name == "delivery-review"
+	})
 	requestedModel := *modelName
 	if !modelExplicit {
 		requestedModel = ""
@@ -58,17 +85,50 @@ func runCLI() int {
 	if *mode != "readonly" && *mode != "workspace" && *mode != "trusted" ||
 		*kind != "" && *kind != "answer" && *kind != "change" ||
 		*verify != "" && *mode != "trusted" ||
-		*resume != "" && (*prompt != "" || *verify != "" || *plan || *kind != "") ||
+		*resume != "" && (*prompt != "" || *verify != "" || *plan || *kind != "" || *reportPath != "") ||
 		*maxTurns < 0 || *maxModels < 0 || *maxTools < 0 || *timeout < 0 || *contextBytes < 1 || strings.TrimSpace(*modelName) == "" {
 		fmt.Fprintln(os.Stderr, "运行参数无效，请查看 -help。恢复任务时使用原目标与验收配置。")
 		return 2
 	}
 	spec := engine.TaskSpec{ID: *resume, Resume: *resume != "", Goal: *prompt, Kind: engine.TaskKind(*kind), VerifyCommand: *verify}
+	if err := applyCLIReadScope(&spec, readScopes, *readNameGlob, *requireFullRead, readGlobExplicit, fullReadExplicit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIOutputStyle(&spec, *outputStyle, styleExplicit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIReadPageBytes(&spec, *readPageBytes, readPageExplicit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIReport(&spec, *reportPath, tools.Mode(*mode), *analysis, *plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	if err := applyCLIAnalysis(&spec, *analysis, tools.Mode(*mode)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if err := applyCLIDelegation(&spec, *delegation, tools.Mode(*mode)); err != nil {
+	delegationValue := *delegation
+	if *quality && spec.Report != nil && delegationValue == "off" {
+		// 报告自身关闭委派；不把兼容入口的 off 误作委派配置。
+		delegationValue = ""
+	}
+	if err := applyCLIDelegation(&spec, delegationValue, tools.Mode(*mode)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIQuality(&spec, *quality, tools.Mode(*mode), *plan, *thinking, *delegation); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIReadFeatures(&spec, readFeatureSwitches); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := applyCLIDeliveryReview(&spec, *deliveryReview, deliveryReviewExplicit, tools.Mode(*mode), *plan, *thinking); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
@@ -85,6 +145,11 @@ func runCLI() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	diagnostics, err := requestdiag.ResolveConfig(*requestDiagnostics, *requestDiagnosticsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求诊断配置无效: %v\n", err)
+		return 2
+	}
 	llm, err := provider.NewConfiguredProvider(channel, model)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -95,6 +160,7 @@ func runCLI() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx = withCLIRequestDiagnostics(ctx, diagnostics)
 	sess := ctxpkg.NewSession(*sessionID, workDir)
 	registry := engine.NewWorkspaceRegistry(workDir)
 	options := engine.EngineOptions{
@@ -107,6 +173,15 @@ func runCLI() int {
 	fmt.Printf("工作区 %s · 执行模式 %s\n", workDir, *mode)
 	if spec.Analysis {
 		fmt.Println("分析模式已启用：重要结论须有有效引用，引用校验不代表结论已经验收。")
+	}
+	if spec.Report != nil {
+		fmt.Printf("证据报告：仅新增 %s，引用校验不代表结论已经验收。\n", spec.Report.TargetPath)
+	}
+	if spec.Quality != nil {
+		fmt.Println("质量模式已启用：本地核验与风险复核分别记录，内部通过不代表独立语义验收。")
+	}
+	if spec.DeliveryReview != nil {
+		fmt.Println("交付前处理已启用：按需最多一次强制退回；剩余未解决项单独交付，不代表语义验收。")
 	}
 	if *resume == "" && tools.Mode(*mode) == tools.ModeReadOnly && (spec.Kind == "" || spec.Kind == engine.TaskAnswer) {
 		fmt.Printf("只读委派策略 %s · 小范围任务由根 Agent 执行\n", spec.Delegation)
@@ -157,12 +232,19 @@ func applyCLIDelegation(spec *engine.TaskSpec, value string, mode tools.Mode) er
 }
 
 func submit(ctx context.Context, eng *engine.AgentEngine, sess *ctxpkg.Session, reporter engine.Reporter, spec engine.TaskSpec) engine.RunResult {
+	diagnostics, configErr := cliRequestDiagnostics(ctx)
+	if configErr != nil {
+		result := engine.RunResult{Status: engine.Failed, StopCode: "invalid_configuration", Reason: "请求诊断配置无效：" + configErr.Error()}
+		fmt.Fprintln(os.Stderr, result.Reason)
+		return result
+	}
 	ctx, attempt := observe.StartFromEnv(ctx, eng.ObservationOptions(sess.WorkDir, "cli", spec))
-	defer attempt.Close()
+	ctx, diagnosticAttempt := engine.StartRequestDiagnostics(ctx, diagnostics)
+	defer engine.CloseRequestDiagnostics(diagnosticAttempt, attempt)
 	result, err := eng.Run(ctx, sess, spec, reporter)
 	ctx = observe.WithTask(ctx, result.TaskID)
 	attempt.Returned(engine.ObservationResult(result, err))
-	_, printErr := fmt.Println(engine.FormatRunResult(result))
+	_, printErr := fmt.Println(engine.FormatRunResultForWorkspace(result, sess.WorkDir))
 	status := "printed"
 	if printErr != nil {
 		status = "failed"

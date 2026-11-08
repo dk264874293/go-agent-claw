@@ -51,6 +51,39 @@ func (e *AgentEngine) openTask(store *taskstore.Store, workDir, sessionID string
 		if spec.Analysis && (spec.Mode != tools.ModeReadOnly || spec.Kind != TaskAnswer || spec.VerifyCommand != "") {
 			return nil, taskState{}, errors.New("分析模式仅支持 readonly + answer，不能指定验收命令")
 		}
+		if err := NormalizeReadFeatures(&spec); err != nil {
+			return nil, taskState{}, err
+		}
+		if spec.ReadPageBytes == 0 {
+			spec.ReadPageBytes = 8000
+		}
+		if spec.ReadPageBytes != 8000 && spec.ReadPageBytes != 16000 {
+			return nil, taskState{}, errors.New("读取档位必须为8000或16000")
+		}
+		if err := NormalizeReadScope(&spec); err != nil {
+			return nil, taskState{}, err
+		}
+		if spec.OutputStyle == "" {
+			spec.OutputStyle = "concise"
+		}
+		if spec.OutputStyle != "concise" && spec.OutputStyle != "detailed" {
+			return nil, taskState{}, errors.New("输出偏好必须为 concise 或 detailed")
+		}
+		if err := NormalizeQualitySpec(&spec); err != nil {
+			return nil, taskState{}, err
+		}
+		if err := NormalizeDeliveryReviewSpec(&spec); err != nil {
+			return nil, taskState{}, err
+		}
+		if spec.DeliveryReview != nil && e.options.EnableThinking {
+			return nil, taskState{}, errors.New("交付前处理不能组合额外思考")
+		}
+		if spec.Quality != nil && e.options.EnableThinking {
+			return nil, taskState{}, errors.New("质量模式不能组合额外思考")
+		}
+		if err := NormalizeReportSpec(&spec); err != nil {
+			return nil, taskState{}, err
+		}
 		delegation, err := initializeDelegation(&spec)
 		if err != nil {
 			return nil, taskState{}, err
@@ -59,7 +92,18 @@ func (e *AgentEngine) openTask(store *taskstore.Store, workDir, sessionID string
 		if err != nil {
 			return nil, taskState{}, fmt.Errorf("%w：创建任务失败: %w", errStorage, err)
 		}
-		return task, taskState{Version: 1, Spec: spec, WorkDir: workDir, SessionID: sessionID, Limits: e.options.Budget.defaults(), Delegation: delegation,
+		version := 1
+		var quality *QualityState
+		var deliveryReview *DeliveryReviewState
+		if spec.DeliveryReview != nil {
+			version = 3
+			deliveryReview = &DeliveryReviewState{Version: 1, Status: "not_run"}
+		}
+		if spec.Quality != nil {
+			version = 2
+			quality = &QualityState{Version: 1, Status: "exploring", CheckResult: "not_run", ReviewStatus: "not_run", RevisionStatus: "not_run"}
+		}
+		return task, taskState{Version: version, DeliveryReview: deliveryReview, Quality: quality, Spec: spec, WorkDir: workDir, SessionID: sessionID, Limits: e.options.Budget.defaults(), Delegation: delegation,
 			EffectLedger: &Delivery{HistoryComplete: true, Effects: []EffectReceipt{}}}, nil
 	}
 	task, err := store.OpenTask(spec.ID)
@@ -67,11 +111,49 @@ func (e *AgentEngine) openTask(store *taskstore.Store, workDir, sessionID string
 		return nil, taskState{}, err
 	}
 	state, err := loadTaskState(task)
+	if err == nil {
+		err = validateReadFeaturesResume(spec, state.Spec)
+	}
+	if err == nil {
+		err = validateDeliveryReviewResume(spec, state.Spec)
+	}
+	if err == nil && state.Spec.DeliveryReview != nil && (e.options.EnableThinking || e.options.Plan) {
+		err = errors.New("交付前处理恢复不能组合额外思考或规划")
+	}
+	if err == nil && spec.Quality != nil {
+		requested := *spec.Quality
+		if requested.Version == 0 {
+			requested.Version = 1
+		}
+		if state.Spec.Quality == nil || *state.Spec.Quality != requested {
+			err = errors.New("恢复时不能开启或更改质量策略")
+		}
+	}
+	if err == nil && state.Spec.Quality != nil && e.options.EnableThinking {
+		err = errors.New("质量任务恢复不能启用额外思考")
+	}
 	if err == nil && (state.Spec.ID != spec.ID || state.WorkDir != workDir || state.SessionID != sessionID) {
 		err = errors.New("任务身份、工作区或会话不匹配")
 	}
 	if err == nil && (modeLevel(state.Spec.Mode) == 0 || !state.Limits.valid()) {
 		err = errors.New("持久任务的权限或预算配置无效")
+	}
+	if err == nil && spec.ReadPageBytes != 0 && spec.ReadPageBytes != effectivePageBytes(state.Spec.ReadPageBytes) {
+		err = errors.New("恢复时不能修改持久读取档位")
+	}
+	if err == nil && spec.OutputStyle != "" && spec.OutputStyle != state.Spec.OutputStyle {
+		err = errors.New("恢复时不能修改持久输出偏好")
+	}
+	if err == nil && spec.ReadScope != nil {
+		if scopeErr := NormalizeReadScope(&spec); scopeErr != nil {
+			err = scopeErr
+		} else {
+			requested, _ := json.Marshal(spec.ReadScope)
+			saved, _ := json.Marshal(state.Spec.ReadScope)
+			if string(requested) != string(saved) {
+				err = errors.New("恢复时不能修改持久资料范围")
+			}
+		}
 	}
 	if err == nil && len(state.Plan) != 0 {
 		err = checkPlan(state.Plan)
@@ -99,11 +181,20 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 	}
 	if len(snapshot.State) != 0 {
 		var checkpoint taskState
-		if err := json.Unmarshal(snapshot.State, &checkpoint); err != nil || checkpoint.Version != 1 {
+		if err := json.Unmarshal(snapshot.State, &checkpoint); err != nil || ValidateTaskStateVersion(checkpoint) != nil {
 			return taskState{}, fmt.Errorf("任务检查点状态版本或内容无效")
 		}
 		if err := validateReadonlyState(checkpoint); err != nil {
 			return taskState{}, fmt.Errorf("任务检查点状态无效: %w", err)
+		}
+		if err := validateReportState(checkpoint); err != nil {
+			return taskState{}, err
+		}
+		if err := validateReadMemoryState(checkpoint); err != nil {
+			return taskState{}, err
+		}
+		if err := validateReadPolicy(checkpoint); err != nil {
+			return taskState{}, err
 		}
 		if err := validateAnalysisState(checkpoint); err != nil {
 			return taskState{}, err
@@ -116,7 +207,7 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 	for _, event := range events {
 		if event.Kind == "elapsed" {
 			var clock elapsedEvent
-			if err := json.Unmarshal(event.Payload, &clock); err != nil || clock.Version != 1 || clock.Elapsed < state.Usage.Elapsed {
+			if err := json.Unmarshal(event.Payload, &clock); err != nil || clock.Version != state.Version || clock.Elapsed < state.Usage.Elapsed {
 				return state, fmt.Errorf("计时事件 %d 无效", event.Sequence)
 			}
 			state.Usage.Elapsed = clock.Elapsed
@@ -127,11 +218,34 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 		if err := json.Unmarshal(event.Payload, &next); err != nil {
 			return state, fmt.Errorf("任务事件 %d 无效: %w", event.Sequence, err)
 		}
-		if next.Version != 1 {
-			return state, fmt.Errorf("不支持的任务版本 %d", next.Version)
+		if state.Version != 0 && (state.Version != next.Version || (state.Spec.Quality == nil) != (next.Spec.Quality == nil)) {
+			return state, fmt.Errorf("同一任务不能更换质量策略或状态版本")
+		}
+		if state.Version != 0 {
+			if err := validateDeliveryReviewTransition(state, next); err != nil {
+				return state, err
+			}
+			if err := validateReadFeatureTransition(state, next); err != nil {
+				return state, err
+			}
+			if err := validateQualityTransition(state, next); err != nil {
+				return state, err
+			}
+		}
+		if err := ValidateTaskStateVersion(next); err != nil {
+			return state, fmt.Errorf("任务状态无效: %w", err)
 		}
 		if err := validateReadonlyState(next); err != nil {
 			return state, fmt.Errorf("任务事件 %d 的只读停止状态无效: %w", event.Sequence, err)
+		}
+		if err := validateReportState(next); err != nil {
+			return state, err
+		}
+		if err := validateReadMemoryState(next); err != nil {
+			return state, err
+		}
+		if err := validateReadPolicy(next); err != nil {
+			return state, err
 		}
 		if err := validateAnalysisState(next); err != nil {
 			return state, fmt.Errorf("任务事件 %d 的分析状态无效: %w", event.Sequence, err)
@@ -139,11 +253,9 @@ func loadTaskState(task *taskstore.Task) (taskState, error) {
 		if err := ValidateDelegationState(next); err != nil {
 			return state, fmt.Errorf("任务事件 %d 委派状态无效: %w", event.Sequence, err)
 		}
-		if event.Sequence >= snapshot.Sequence {
-			state = next
-		}
+		state = next
 	}
-	if state.Version != 1 {
+	if ValidateTaskStateVersion(state) != nil {
 		return state, errors.New("任务没有可恢复的状态")
 	}
 	return state, nil

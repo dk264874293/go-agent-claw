@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/dk264874293/go-agent-claw/internal/engine"
+	"github.com/dk264874293/go-agent-claw/internal/requestdiag"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 )
 
@@ -21,13 +23,19 @@ type Config struct {
 }
 
 type ChatBinding struct {
-	WorkDir       string     `json:"work_dir"`
-	AllowedUsers  []string   `json:"allowed_users"`
-	Approvers     []string   `json:"approvers"`
-	Mode          tools.Mode `json:"mode"`
-	VerifyCommand string     `json:"verify_command,omitempty"`
-	Analysis      bool       `json:"analysis,omitempty"`
-	Delegation    string     `json:"delegation,omitempty"`
+	WorkDir               string                  `json:"work_dir"`
+	AllowedUsers          []string                `json:"allowed_users"`
+	Approvers             []string                `json:"approvers"`
+	Mode                  tools.Mode              `json:"mode"`
+	VerifyCommand         string                  `json:"verify_command,omitempty"`
+	Analysis              bool                    `json:"analysis,omitempty"`
+	Delegation            string                  `json:"delegation,omitempty"`
+	ReadPageBytes         int                     `json:"read_page_bytes,omitempty"`
+	ReadFeatures          *engine.ReadFeatureSpec `json:"read_features,omitempty"`
+	ReadScope             *engine.ReadScopeSpec   `json:"read_scope,omitempty"`
+	OutputStyle           string                  `json:"output_style,omitempty"`
+	RequestDiagnostics    string                  `json:"request_diagnostics,omitempty"`
+	RequestDiagnosticsDir string                  `json:"request_diagnostics_dir,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -56,6 +64,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("无法定位飞书事件台账目录: %w", err)
 	}
 	for id, binding := range c.Chats {
+		if _, err := requestdiag.ResolveConfig(binding.RequestDiagnostics, binding.RequestDiagnosticsDir); err != nil {
+			return fmt.Errorf("群聊 %q 的请求诊断配置无效: %w", id, err)
+		}
 		if strings.TrimSpace(id) == "" || len(binding.AllowedUsers) == 0 || !filepath.IsAbs(binding.WorkDir) {
 			return fmt.Errorf("群聊 %q 缺少成员或绝对工作区路径", id)
 		}
@@ -94,9 +105,28 @@ func (c *Config) validate() error {
 		if binding.VerifyCommand != "" && binding.Mode != tools.ModeTrusted {
 			return fmt.Errorf("群聊 %q 的验收命令需要可信本机模式", id)
 		}
+		if binding.ReadPageBytes != 0 && binding.ReadPageBytes != 8000 && binding.ReadPageBytes != 16000 {
+			return fmt.Errorf("群聊 %q 的读取档位必须为 8000 或 16000 字节", id)
+		}
+		reading := engine.TaskSpec{ReadScope: binding.ReadScope}
+		if err := engine.NormalizeReadScope(&reading); err != nil {
+			return fmt.Errorf("群聊 %q 的读取范围无效: %w", id, err)
+		}
+		binding.ReadScope = reading.ReadScope
+		if binding.OutputStyle == "" {
+			binding.OutputStyle = "concise"
+		}
+		if binding.OutputStyle != "concise" && binding.OutputStyle != "detailed" {
+			return fmt.Errorf("群聊 %q 的输出篇幅必须为 concise 或 detailed", id)
+		}
 		if binding.Analysis && (binding.Mode != tools.ModeReadOnly || binding.VerifyCommand != "") {
 			return fmt.Errorf("群聊 %q 的分析模式仅支持只读模式且不能设置验收命令", id)
 		}
+		featureSpec := engine.TaskSpec{Analysis: binding.Analysis, ReadFeatures: binding.ReadFeatures}
+		if err := engine.NormalizeReadFeatures(&featureSpec); err != nil {
+			return fmt.Errorf("群聊 %q 的读取实验配置无效: %w", id, err)
+		}
+		binding.ReadFeatures = featureSpec.ReadFeatures
 		if binding.Delegation != "" && (binding.Delegation != "auto" && binding.Delegation != "off" && binding.Delegation != "on" || binding.Mode != tools.ModeReadOnly || binding.VerifyCommand != "") {
 			return fmt.Errorf("群聊 %q 的委派策略必须是只读回答模式下的 auto、off 或 on", id)
 		}

@@ -93,3 +93,12 @@ func Emit(ctx context.Context, kind string, payload Payload) {
 		s.attempt.emit(s.ids, kind, payload)
 	}
 }
+
+// EmitWithIdentity 用复制的调用身份发布异步诊断摘要，不持有请求或会话对象。
+// attempt/workspace 仍由原Recorder绑定，调用方不能借此切换观测目录。
+func EmitWithIdentity(ctx context.Context, ids IdentityInfo, kind string, payload Payload) {
+	s, _ := ctx.Value(contextKey{}).(scope)
+	if s.attempt != nil {
+		s.attempt.emit(ids, kind, payload)
+	}
+}

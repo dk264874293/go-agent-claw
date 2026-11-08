@@ -3,6 +3,7 @@ package monitor
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -128,12 +129,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "workspaces":
 		jsonOut(w, map[string]any{"items": s.Index.Workspaces()})
+	case p == "overview":
+		jsonOut(w, s.Index.Overview(r.URL.Query().Get("workspace")))
 	case p == "tasks":
 		page := intParam(r, "page", 1, 1, 1000000)
 		size := intParam(r, "page_size", 50, 1, 200)
-		items := s.Index.Tasks(r.URL.Query().Get("workspace"), r.URL.Query().Get("status"), r.URL.Query().Get("q"))
+		query := r.URL.Query()
+		var hasAlerts *bool
+		if raw := query.Get("has_alerts"); raw == "true" || raw == "false" {
+			value := raw == "true"
+			hasAlerts = &value
+		}
+		items := s.Index.QueryTasks(TaskQuery{Workspace: query.Get("workspace"), Status: query.Get("status"), Q: query.Get("q"), ActivityGroup: query.Get("activity_group"), HasAlerts: hasAlerts, Sort: query.Get("sort")})
 		start := min((page-1)*size, len(items))
-		jsonOut(w, map[string]any{"items": items[start:min(start+size, len(items))], "total": len(items), "page": page, "page_size": size})
+		var pageItems any = items[start:min(start+size, len(items))]
+		if query.Get("view") == "summary" {
+			summaries := []TaskSummary{}
+			for _, item := range items[start:min(start+size, len(items))] {
+				summaries = append(summaries, taskSummary(item))
+			}
+			pageItems = summaries
+		}
+		jsonOut(w, map[string]any{"items": pageItems, "total": len(items), "page": page, "page_size": size})
+	case p == "alerts":
+		query := r.URL.Query()
+		jsonOut(w, s.Index.Alerts(query.Get("workspace"), query.Get("q"), query.Get("category"), intParam(r, "page", 1, 1, 1000000), intParam(r, "page_size", 50, 1, 200)))
 	case strings.HasPrefix(p, "tasks/"):
 		id := strings.TrimPrefix(p, "tasks/")
 		t, ok := s.Index.Task(id)
@@ -170,6 +190,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(p, "evidence/")
 		s.Index.mu.RLock()
 		src, ok := s.Index.evidence[id]
+		if ok {
+			ok = s.Index.evidenceVisible(src)
+		}
 		s.Index.mu.RUnlock()
 		if !ok {
 			fail(w, 404, "证据不存在")
@@ -184,6 +207,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		truncated := len(raw) > 1<<20
+		if src.expectedVersion != "" {
+			if truncated {
+				fail(w, 413, "产物超过有界查看上限，无法核对完整版本")
+				return
+			}
+			digest := sha256.Sum256(raw)
+			if hex.EncodeToString(digest[:]) != src.expectedVersion {
+				fail(w, 409, "产物已经变化，当前内容不再对应写入回执")
+				return
+			}
+		}
 		if truncated {
 			raw = raw[:1<<20]
 		}
@@ -207,7 +241,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, map[string]any{"id": id, "text": text[start:end], "next_offset": end, "has_more": end < len(text), "truncated": truncated})
 	case p == "evaluations":
-		jsonOut(w, map[string]any{"items": s.Index.Evaluations()})
+		jsonOut(w, map[string]any{"items": s.Index.WorkspaceEvaluations(r.URL.Query().Get("workspace"))})
 	case p == "stream":
 		s.stream(w, r)
 	default:

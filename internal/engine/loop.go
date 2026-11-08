@@ -17,6 +17,7 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/observability"
 	"github.com/dk264874293/go-agent-claw/internal/observe"
 	"github.com/dk264874293/go-agent-claw/internal/provider"
+	"github.com/dk264874293/go-agent-claw/internal/requestdiag"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/dk264874293/go-agent-claw/internal/taskstore"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
@@ -86,7 +87,7 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	}
 	defer task.Close()
 	// 直接调用引擎也需要内部根身份；不创建 Recorder、不强制新增观测落盘。
-	if (state.Spec.Analysis || readonlyAnswer(state.Spec)) && observe.Identity(parent).AgentID == "" {
+	if observe.Identity(parent).AgentID == "" {
 		parent = observe.WithAgent(parent, newID(), "")
 	}
 	observedMode := state.Spec.Mode
@@ -98,16 +99,30 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		observedMode = requestedMode
 	}
 	observe.Emit(parent, "run_configured", observe.Payload{
-		Analysis: state.Spec.Analysis, Delegation: state.Spec.Delegation,
+		DeliveryReview:     deliveryReviewObservation(recordedDeliveryReviewSummary(state), state.Spec.DeliveryReview != nil),
+		ReadFeatures:       observationReadFeatures(state.Spec),
+		ReadContextVersion: int64(state.Spec.ReadContextVersion),
+		ReadPageBytes:      int64(effectivePageBytes(state.Spec.ReadPageBytes)), Analysis: state.Spec.Analysis, Delegation: state.Spec.Delegation,
 		Kind: string(state.Spec.Kind), Mode: string(observedMode), Goal: state.Spec.Goal,
 		MaxModelCalls: int64(state.Limits.MaxModelCalls), MaxToolCalls: int64(state.Limits.MaxToolCalls),
 		MaxTurns: int64(state.Limits.MaxTurns), TimeoutMS: state.Limits.Timeout.Milliseconds(),
 		ModelCalls: int64(state.Usage.ModelCalls), ToolCalls: int64(state.Usage.ToolCalls), Turns: int64(state.Usage.Turns), ElapsedMS: state.Usage.Elapsed.Milliseconds(),
 	})
-	if state.LastResult != nil {
+	if state.LastResult != nil && state.Spec.Quality == nil {
 		previous := *state.LastResult
 		previous.Delivery = deliveryFromState(state)
+		if previous.DeliveryReview != nil {
+			copied := *previous.DeliveryReview
+			copied.RecordedOnly = true
+			previous.DeliveryReview = &copied
+		}
 		if previous.Status == Answered {
+			if previous.Reading != nil {
+				reading := *previous.Reading
+				reading.RecordedOnly = true
+				previous.Reading = &reading
+				previous.Reason = "复用历史答复；读取覆盖仅代表原运行，未重新核对当前文件"
+			}
 			if state.Spec.Analysis {
 				previous.Reason = "复用历史分析答复；引用仅说明原运行当时的读取版本，未重新核对当前文件"
 			}
@@ -144,7 +159,7 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	if modeLevel(requested) < modeLevel(mode) {
 		mode = requested
 	}
-	ctx = tools.WithScope(ctx, tools.ExecutionScope{Mode: mode, WorkDir: workDir})
+	ctx = tools.WithScope(ctx, tools.ExecutionScope{Mode: mode, WorkDir: workDir, ReadPageBytes: effectivePageBytes(state.Spec.ReadPageBytes), ReportOnly: state.Spec.Report != nil, DisableSubagent: state.Spec.Report != nil || state.Spec.Quality != nil})
 	ctx, span := observability.StartSpan(ctx, "Agent.Run")
 	span.AddAttribute("run_id", result.RunID)
 	span.AddAttribute("task_id", result.TaskID)
@@ -194,12 +209,23 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		}
 	}()
 	defer func() {
-		if r.readonlyAnswer() {
+		if r.readonlyAnswer() || r.readMemoryEnabled() {
 			result.Reading = r.readingCoverage(ctx)
+		}
+		if r.state.Spec.Report != nil {
+			var reportErr error
+			result.Report, reportErr = r.reportDelivery()
+			if reportErr != nil {
+				err = errors.Join(err, reportErr)
+			}
 		}
 		if r.analysisEnabled() {
 			result.Analysis = r.analysisReport(ctx)
 		}
+		result.Quality = r.qualityDelivery()
+		r.mu.Lock()
+		result.LocalChecks = append([]LocalCheckSummary(nil), r.state.LocalChecks...)
+		r.mu.Unlock()
 		if storageErr := r.storageError(); storageErr != nil {
 			err = errors.Join(err, storageErr)
 		}
@@ -215,6 +241,15 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			} else if (result.Status == BudgetExhausted || result.StopCode == "readonly_repeat") && errors.Is(ctx.Err(), context.Canceled) {
 				result.Status, result.Reason, result.StopCode = Cancelled, "任务已取消", "cancelled"
 			}
+		}
+		if reviewErr := r.finalizeDeliveryReview(ctx); reviewErr != nil {
+			err = errors.Join(err, reviewErr)
+			result.Status, result.Reason, result.StopCode = Failed, reviewErr.Error(), "storage_error"
+		}
+		result.DeliveryReview = r.deliveryReviewSummary(context.WithoutCancel(ctx))
+		var finalContentIssues []DeliveryReviewIssue
+		if result.FinalText != "" && (result.Status == Answered || result.Status == Verified || result.Status == NeedsVerification) {
+			finalContentIssues = contentReviewIssues(r.reviewDeliveryContent(context.WithoutCancel(ctx), "", result.FinalText))
 		}
 		// 收尾仍属于执行时间。计时落盘持续覆盖最后一次模型请求，之后才汇总故障。
 		close(clockStop)
@@ -236,12 +271,21 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			result.Reason = err.Error()
 		}
 		if saveErr := r.record("finished", func(s *taskState) error {
+			recordDeliveryReviewAnswer(s, result)
+			if result.DeliveryReview != nil && s.DeliveryReview != nil {
+				if result.FinalText != "" {
+					result.DeliveryReview.Unresolved = append(result.DeliveryReview.Unresolved, finalContentIssues...)
+				}
+				result.DeliveryReview.ContentComparisons = append([]DeliveryReviewContentComparison(nil), s.DeliveryReview.ContentComparisons...)
+				s.DeliveryReview.Summary = result.DeliveryReview
+			}
 			result.Usage = s.Usage
 			result.Usage.Elapsed = r.elapsed + time.Since(r.started)
 			result.Verification = s.Verification
 			result.Delivery = deliveryFromState(*s)
-			if s.Spec.Analysis && s.Analysis != nil {
-				if report, ok := s.Analysis.Reports[observe.Identity(ctx).AgentID]; ok {
+			result.Artifacts = artifactsFromDelivery(result.Delivery)
+			if s.Spec.Analysis && analysisStateOf(*s) != nil {
+				if report, ok := analysisStateOf(*s).Reports[observe.Identity(ctx).AgentID]; ok {
 					result.Analysis = &report
 				}
 			}
@@ -265,6 +309,9 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 			log.Printf("无法导出任务追踪: %v", traceErr)
 		}
 	}()
+	if err := r.markInterruptedDeliveryReview(); err != nil {
+		return result, err
+	}
 	if err := r.record("started", func(s *taskState) error { s.Reading = nil; return nil }); err != nil {
 		return result, err
 	}
@@ -276,6 +323,25 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	} else if reason != "" {
 		result.Status, result.Reason = Blocked, reason
 		return result, nil
+	}
+	if state.Spec.Report != nil {
+		if done, recoverErr := r.recoverReportPublication(ctx); recoverErr != nil {
+			return result.stop(ctx, recoverErr)
+		} else if done {
+			if err := ctx.Err(); err != nil {
+				return result.stop(ctx, err)
+			}
+			out, reportErr := r.reportSummaryResult(result)
+			if reportErr != nil {
+				return out.stop(ctx, reportErr)
+			}
+			return out, nil
+		}
+	}
+	if r.state.Spec.Report != nil {
+		if targetErr := r.checkReportTarget(ctx); targetErr != nil {
+			return result.stop(ctx, targetErr)
+		}
 	}
 	if spec.Resume {
 		r.resumeReceipts = make(map[string]schema.ToolResult, len(r.state.Completed))
@@ -304,9 +370,22 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 		return result, nil
 	}
 
+	if r.qualityEnabled() && r.state.Quality.DraftID != "" {
+		text, qualityErr := e.resumeQuality(ctx, r, session, reporter)
+		if qualityErr != nil {
+			return result.stop(ctx, qualityErr)
+		}
+		if r.state.Spec.Report != nil {
+			return r.reportSummaryResult(result)
+		}
+		result.Status, result.Reason, result.FinalText = Answered, "已交付质量分析；语义验收未运行", text
+		return result, nil
+	}
+	r.bindTaskHistory(session)
 	session.Append(schema.Message{Role: schema.RoleUser, Content: state.Spec.Goal})
 	system = ctxpkg.NewPromptComposer(workDir, false).Build()
 	system.Content += "\n\n执行模式：" + string(mode) + "。工具准入由程序控制。"
+	system.Content += runtimeWorkspaceContext(workDir)
 	if spec.Resume {
 		if err := r.resumedReadonlyStop(ctx); err != nil {
 			return result.stop(ctx, err)
@@ -326,6 +405,22 @@ func (e *AgentEngine) Run(parent context.Context, session *ctxpkg.Session, spec 
 	}
 	text, err := e.runTask(ctx, r, session, system, reporter)
 	if err != nil {
+		return result.stop(ctx, err)
+	}
+	if r.state.Spec.Report != nil {
+		if err := ctx.Err(); err != nil {
+			return result.stop(ctx, err)
+		}
+		out, reportErr := r.reportSummaryResult(result)
+		if reportErr != nil {
+			return out.stop(ctx, reportErr)
+		}
+		return out, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return result.stop(ctx, err)
+	}
+	if err := r.checkReadingComplete(ctx); err != nil {
 		return result.stop(ctx, err)
 	}
 	result.FinalText = text
@@ -348,6 +443,7 @@ func (r RunResult) stop(ctx context.Context, err error) (RunResult, error) {
 	r.Reason = err.Error()
 	var limit budgetLimit
 	var readonlyStop readonlyRepeatStop
+	var reportStop reportError
 	var networkError net.Error
 	switch {
 	case errors.Is(err, errStorage):
@@ -367,11 +463,17 @@ func (r RunResult) stop(ctx context.Context, err error) (RunResult, error) {
 		return r, err
 	case errors.As(err, &readonlyStop):
 		r.Status, r.StopCode = Blocked, "readonly_repeat"
+	case errors.As(err, &reportStop):
+		r.Status, r.StopCode = Blocked, reportStop.code
 	case errors.Is(err, errAnalysisReportInvalid):
 		r.Status, r.StopCode = Blocked, "analysis_report_invalid"
 	case errors.Is(err, errContextBudget), errors.Is(err, errBlocked):
 		r.Status, r.StopCode = Blocked, "blocked"
 	default:
+		if kind := provider.FailureKind(err); kind != "" {
+			r.Status, r.StopCode = Failed, kind
+			return r, err
+		}
 		r.Status = Failed
 		return r, err
 	}
@@ -458,34 +560,50 @@ func (e *AgentEngine) generate(ctx context.Context, r *runState, msgs []schema.M
 // generateRequest 共享预算上下文、压缩、调用和观测。收尾使用原子准入而不是再次扣模型次数。
 func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []schema.Message, defs []schema.ToolDefinition, closing bool) (*schema.Message, error) {
 	snapshot := r.requestBudgetSnapshot(ctx)
+	reviewRequest, _ := ctx.Value(deliveryReviewRequestKey{}).(bool)
+	if reviewRequest {
+		snapshot.ModelCallsRemaining++
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		snapshot.RemainingMS = min(snapshot.RemainingMS, max(int64(0), time.Until(deadline).Milliseconds()))
 	}
+	purpose, _ := ctx.Value(qualityPurposeKey{}).(string)
 	request := append([]schema.Message(nil), msgs...)
-	if block := r.readingContext(ctx); block != "" {
-		if len(request) > 0 && request[0].Role == schema.RoleSystem {
-			request[0].Content += "\n" + block
-		} else {
-			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+	if purpose == "" {
+		if block := outputStylePrompt(r.state.Spec); block != "" {
+			if len(request) > 0 && request[0].Role == schema.RoleSystem {
+				request[0].Content += "\n" + block
+			} else {
+				request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+			}
 		}
-	}
-	if block := func() string {
-		if r.analysisEnabled() {
-			return ""
+		if block := r.readingContext(ctx); block != "" {
+			if len(request) > 0 && request[0].Role == schema.RoleSystem {
+				request[0].Content += "\n" + block
+			} else {
+				request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+			}
 		}
-		return r.readContext(ctx)
-	}(); block != "" {
-		if len(request) > 0 && request[0].Role == schema.RoleSystem {
-			request[0].Content += "\n\n" + block
-		} else {
-			request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+		if block := func() string {
+			if r.analysisEnabled() {
+				return ""
+			}
+			return r.readContext(ctx)
+		}(); block != "" {
+			if len(request) > 0 && request[0].Role == schema.RoleSystem {
+				request[0].Content += "\n\n" + block
+			} else {
+				request = append([]schema.Message{{Role: schema.RoleSystem, Content: block}}, request...)
+			}
 		}
 	}
 	var prepared []schema.Message
 	var delivered []string
 	var stats analysisRequestStats
 	var err error
-	if r.analysisEnabled() {
+	if purpose != "" {
+		prepared, err = ctxpkg.CompactAnalysisWithin(withBudgetContext(request, snapshot), defs, e.options.MaxContextBytes)
+	} else if r.evidenceEnabled() {
 		prepared, delivered, stats, err = e.prepareAnalysisRequest(ctx, r, withBudgetContext(request, snapshot), defs)
 	} else {
 		prepared, err = e.compactor.CompactWithin(withBudgetContext(request, snapshot), defs)
@@ -493,7 +611,15 @@ func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []s
 	if err != nil {
 		return nil, fmt.Errorf("%w：%v", errContextBudget, err)
 	}
-	if closing {
+	if purpose != "" {
+		if err := r.reserveQualityStage(ctx, purpose); err != nil {
+			return nil, err
+		}
+	} else if reviewRequest {
+		if err := r.takeDeliveryReviewModel(ctx); err != nil {
+			return nil, err
+		}
+	} else if closing {
 		if err := r.reserveClosing(ctx); err != nil {
 			return nil, err
 		}
@@ -507,6 +633,11 @@ func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []s
 	}
 	callCtx, span := observability.StartSpan(observe.WithModelCall(ctx, observe.NewID()), "LLM.Generate")
 	defer span.EndSpan()
+	diagnosticIDs := diagnosticIdentity(observe.Identity(callCtx))
+	if requestdiag.Mode(callCtx) != requestdiag.Off && diagnosticIDs.WorkspaceID == "" {
+		diagnosticIDs.WorkspaceID = observe.WorkspaceID(r.state.WorkDir)
+	}
+	callCtx, diagnosticCall := requestdiag.BeginCall(callCtx, diagnosticIDs, r.requestOrigins(prepared))
 	var material []byte
 	if observe.Identity(callCtx).AttemptID != "" {
 		material, _ = json.Marshal(struct {
@@ -519,9 +650,35 @@ func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []s
 		model = named.ModelName()
 	}
 	started := time.Now()
-	observe.Emit(callCtx, "model_started", observe.Payload{Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ToolCount: int64(len(defs)), SourceBytes: stats.source, AnalysisBytes: stats.notes, EvidenceBytes: stats.evidence, ActionBytes: stats.actions, SchemaBytes: stats.schema, FoldedReads: stats.folded, SoftTargetBytes: stats.target, SoftTargetExceeded: stats.over})
+	promptBytes, _ := ctx.Value(featurePromptBytesKey{}).(int64)
+	deliveryPromptBytes, _ := ctx.Value(deliveryReviewPromptBytesKey{}).(int64)
+	checkSchemaBytes, viewSchemaBytes := int64(0), int64(0)
+	for _, def := range defs {
+		raw, _ := json.Marshal(def)
+		if def.Name == "check_evidence" {
+			checkSchemaBytes += int64(len(raw))
+		}
+		if def.Name == "read_evidence" && r.sourceViewsEnabled() {
+			viewSchemaBytes += int64(len(raw))
+		}
+	}
+	observe.Emit(callCtx, "model_started", observe.Payload{DeliveryReviewPromptBytes: &deliveryPromptBytes, LocalCheckSchemaBytes: &checkSchemaBytes, SourceViewSchemaBytes: &viewSchemaBytes, FeaturePromptBytes: &promptBytes, Model: model, Stage: modelStage(callCtx), ContextBytes: int64(len(material)), ReadContextVersion: int64(r.state.Spec.ReadContextVersion), ReadPageBytes: int64(r.effectiveReadPageBytes()), ToolCount: int64(len(defs)), SourceBytes: stats.source, AnalysisBytes: stats.notes, EvidenceBytes: stats.evidence, ActionBytes: stats.actions, SchemaBytes: stats.schema, FoldedReads: stats.folded, SoftTargetBytes: stats.target, SoftTargetExceeded: stats.over, UnprocessedReadCount: stats.unprocessed, FoldedSourceBytes: stats.foldedSource, OmittedNoteEntries: stats.omittedNotes, NotesMetadataRemovedBytes: stats.notesRemoved, NotesMetadataRetainedBytes: stats.notesRetained, NotesPreviouslyDelivered: stats.notesPreviouslyDelivered, NotesThisRequest: stats.notesThisRequest})
+	r.observeSourceViewLifecycle(callCtx, "source_view_folded", stats.viewFoldedIDs)
 	msg, err := e.provider.Generate(callCtx, prepared, defs)
+	if diagnosticCall != nil {
+		diagnosticKind := observationError(err)
+		if err == nil && msg == nil {
+			diagnosticKind = "model_response_invalid"
+		}
+		if ctx.Err() != nil {
+			diagnosticKind = observationError(ctx.Err())
+		}
+		diagnosticCall.Finish(requestdiag.Outcome{Success: err == nil && msg != nil && ctx.Err() == nil, ErrorClass: diagnosticKind})
+	}
 	errorClass := observationError(err)
+	if ctx.Err() != nil {
+		errorClass = observationError(ctx.Err())
+	}
 	if msg == nil && err == nil {
 		errorClass = "empty_response"
 	}
@@ -535,8 +692,16 @@ func (e *AgentEngine) generateRequest(ctx context.Context, r *runState, msgs []s
 	if msg == nil {
 		return nil, errors.New("模型没有返回消息")
 	}
-	r.markAnalysisDelivered(ctx, delivered)
-	r.markReadExposure(ctx, prepared)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if purpose == "" {
+		r.markAnalysisDelivered(callCtx, delivered)
+		r.markReadExposure(ctx, prepared)
+	}
+	// 响应身份只留在进程内，不能进入原始历史或 Provider 请求。
+	msg.SourceModelCallID = observe.Identity(callCtx).ModelCallID
+	msg.NotesCandidateCount = stats.unprocessed
 	return msg, nil
 }
 
@@ -550,12 +715,41 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			if turn >= subTurns {
 				return "", fmt.Errorf("%w：子任务达到 %d 轮", errBlocked, subTurns)
 			}
-		} else if err := r.reserve(ctx, "turn"); err != nil {
-			return "", err
+		}
+		reviewRequest := false
+		if subTurns == 0 {
+			var turnErr error
+			reviewRequest, turnErr = r.takeDeliveryReviewTurn(ctx)
+			if turnErr != nil {
+				return "", turnErr
+			}
+			if !reviewRequest {
+				if err := r.reserve(ctx, "turn"); err != nil {
+					return "", err
+				}
+			}
 		}
 		prompt := system
+		featurePrompt := r.readFeaturePrompt(ctx)
+		deliveryPrompt := ""
 		if subTurns == 0 {
-			if r.analysisEnabled() || r.efficiencyEnabled() {
+			deliveryPrompt = r.deliveryReviewPrompt(ctx)
+		}
+		prompt.Content += featurePrompt + deliveryPrompt
+		requestCtx := context.WithValue(ctx, featurePromptBytesKey{}, int64(len(featurePrompt)))
+		requestCtx = context.WithValue(requestCtx, deliveryReviewPromptBytesKey{}, int64(len(deliveryPrompt)))
+		if reviewRequest {
+			requestCtx = context.WithValue(requestCtx, deliveryReviewRequestKey{}, true)
+			requestCtx = context.WithValue(requestCtx, modelStageKey{}, "delivery_review")
+		}
+		if r.qualityEnabled() {
+			prompt.Content += "\n" + qualityPrompt
+		}
+		if r.state.Spec.Report != nil && !r.qualityEnabled() {
+			prompt.Content += "\n" + reportPrompt
+		}
+		if subTurns == 0 {
+			if r.analysisEnabled() || r.readTrackingEnabled() {
 				prompt.Content += r.analysisAnchor(stepGoal)
 			} else {
 				anchor, _ := json.Marshal(struct {
@@ -567,14 +761,18 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			}
 		}
 		history := append([]schema.Message{prompt}, session.GetWorkingMemory(20)...)
-		if r.analysisEnabled() {
-			history = append([]schema.Message{prompt}, analysisHistory(session)...)
+		if r.evidenceEnabled() {
+			if r.readMemoryEnabled() {
+				history = append([]schema.Message{prompt}, r.taskHistory(session)...)
+			} else {
+				history = append([]schema.Message{prompt}, analysisHistory(session)...)
+			}
 		}
 		if subTurns == 0 && e.options.EnableThinking {
 			if reporter != nil {
 				reporter.OnThinking(ctx)
 			}
-			thinking, err := e.generate(context.WithValue(ctx, modelStageKey{}, "thinking"), r, history, nil)
+			thinking, err := e.generate(context.WithValue(requestCtx, modelStageKey{}, "thinking"), r, history, nil)
 			if err != nil {
 				return "", err
 			}
@@ -582,11 +780,36 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 				history = append(history, schema.Message{Role: schema.RoleAssistant, Content: thinking.Content, ResponseItems: thinking.ResponseItems})
 			}
 		}
-		msg, err := e.generate(ctx, r, history, r.visibleTools(ctx, registry))
+		msg, err := e.generate(requestCtx, r, history, r.visibleTools(ctx, registry))
+		if reviewRequest {
+			if finishErr := r.finishDeliveryReviewRequest(ctx, err); finishErr != nil {
+				return "", errors.Join(err, finishErr)
+			}
+			r.observeDeliveryReview(ctx, "delivery_review_completed")
+		}
 		if err != nil {
 			return "", err
 		}
 		text := strings.TrimSpace(msg.Content)
+		if r.qualityEnabled() {
+			if handled, out, qualityErr := e.qualityToolResponse(ctx, r, session, registry, reporter, msg); handled {
+				return out, qualityErr
+			}
+		}
+		reportSubmit := false
+		if r.state.Spec.Report != nil && !r.qualityEnabled() {
+			if len(msg.ToolCalls) == 0 {
+				return "", reportError{"report_not_delivered", "报告尚未通过write_report提交"}
+			}
+			for _, c := range msg.ToolCalls {
+				if c.Name == "write_report" {
+					reportSubmit = true
+				}
+			}
+			if reportSubmit && len(msg.ToolCalls) != 1 {
+				return "", e.rejectReportBatch(ctx, r, session, msg)
+			}
+		}
 		var analysis *AnalysisReport
 		if r.analysisEnabled() && (text != "" || len(msg.ToolCalls) == 0) {
 			analysis, err = r.acceptAnalysis(ctx, text, len(msg.ToolCalls) == 0)
@@ -595,8 +818,19 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			}
 		}
 		if len(msg.ToolCalls) == 0 {
+			r.observeWorkNotesResponse(ctx, msg, workNotesCarrierBatch{}, "")
 			if text == "" {
 				return "", fmt.Errorf("%w：模型没有交付内容", errBlocked)
+			}
+			if subTurns == 0 && r.deliveryReviewBoundary(ctx, registry, nil, stepID) {
+				admitted, reviewErr := r.admitDeliveryReview(ctx, *msg)
+				if reviewErr != nil {
+					return "", reviewErr
+				}
+				if admitted {
+					session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ResponseItems: msg.ResponseItems}, schema.Message{Role: schema.RoleUser, Content: "交付前处理已准入：请处理当前有来源的待办目录。可直接修订终答；没有结构化处置的事项仍列待核实，不要为登记状态调用无用工具。"})
+					continue
+				}
 			}
 			session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ResponseItems: msg.ResponseItems})
 			if analysis != nil && subTurns == 0 {
@@ -611,18 +845,49 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			}
 			seen[call.ID] = true
 		}
+		notesCtx := observe.WithModelCall(ctx, msg.SourceModelCallID)
+		beforeNotes := r.workNotesObservationSnapshot(notesCtx, text)
+		carriers, err := r.consumeWorkNotesCarriers(notesCtx, msg.ToolCalls)
+		if err != nil {
+			return "", err
+		}
+		if !carriers.valid {
+			if err := r.acceptWorkNotes(notesCtx, text); err != nil {
+				return "", err
+			}
+			r.observeWorkNotesTextFallback(notesCtx, text, beforeNotes, &carriers)
+		}
+		r.observeWorkNotesResponse(ctx, msg, carriers, "")
+		if subTurns == 0 {
+			if err := r.refreshDeliveryReview(notesCtx); err != nil {
+				return "", err
+			}
+			if r.deliveryReviewBoundary(notesCtx, registry, carriers.calls, stepID) {
+				candidate := *msg
+				candidate.ToolCalls = carriers.calls
+				admitted, reviewErr := r.admitDeliveryReview(notesCtx, candidate)
+				if reviewErr != nil {
+					return "", reviewErr
+				}
+				if admitted {
+					notesCtx = context.WithValue(notesCtx, deliveryReviewDeferredKey{}, true)
+				}
+			}
+		}
 		session.Append(schema.Message{Role: schema.RoleAssistant, Content: text, ToolCalls: msg.ToolCalls, ResponseItems: msg.ResponseItems})
-		results, batchErr := e.executeBatch(ctx, r, registry, reporter, msg.ToolCalls, stepID)
+		results, batchErr := e.executeBatch(notesCtx, r, registry, reporter, carriers.calls, stepID)
 		var observations []schema.Message
 		var stopped error
 		var boundaryErr error
 		var readonlyCandidates []ReadonlyFailureBoundary
 		for i, result := range results {
-			call := msg.ToolCalls[i]
+			call := carriers.calls[i]
 			content := observation(result)
-			if result.IsError {
+			if result.IsError && result.ErrorCode != "delivery_review_required" {
 				content = e.recovery.AnalyzeAndInject(call.Name, content)
 			}
+			content = carriers.appendReceipt(i, content)
+			r.rememberReadObservation(ctx, result, content)
 			evidenceID := ""
 			if result.Read != nil {
 				evidenceID = result.Read.EvidenceID
@@ -633,7 +898,7 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 			}
 			observations = append(observations, schema.Message{Role: schema.RoleUser, ToolCallID: call.ID, ToolStatus: result.Status, Content: content, ReadEvidenceID: evidenceID, ReadActionID: readActionID})
 			trackedReadonly := false
-			if subTurns == 0 {
+			if subTurns == 0 && result.ErrorCode != "delivery_review_required" {
 				boundary, trackErr := r.noteReadonlyResult(ctx, stepID, call, result)
 				if trackErr != nil {
 					boundaryErr = errors.Join(boundaryErr, trackErr)
@@ -645,7 +910,7 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 				}
 			}
 			key := actionKey(stepID, call)
-			if !result.IsError {
+			if !result.IsError || result.ErrorCode == "delivery_review_required" {
 				delete(failures, key)
 			} else {
 				failures[key]++
@@ -657,6 +922,12 @@ func (e *AgentEngine) converse(ctx context.Context, r *runState, session *ctxpkg
 		session.Append(observations...)
 		if batchErr != nil {
 			return "", batchErr
+		}
+		if reportSubmit {
+			if len(results) != 1 || results[0].Status != schema.ToolSucceeded {
+				return "", r.reportFailure("报告未发布")
+			}
+			return "", nil
 		}
 		if boundaryErr != nil {
 			return "", boundaryErr
@@ -712,6 +983,14 @@ func actionKey(stepID string, call schema.ToolCall) string {
 }
 
 func (e *AgentEngine) executeBatch(ctx context.Context, r *runState, registry tools.Registry, reporter Reporter, calls []schema.ToolCall, stepID string) ([]schema.ToolResult, error) {
+	if r.localChecksEnabled() {
+		for _, call := range calls {
+			if call.Name == "check_evidence" {
+				ctx = context.WithValue(ctx, localCheckBatchKey{}, true)
+				break
+			}
+		}
+	}
 	results := make([]schema.ToolResult, len(calls))
 	errs := make([]error, len(calls))
 	next := 0

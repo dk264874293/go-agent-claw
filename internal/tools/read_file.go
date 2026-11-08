@@ -22,7 +22,7 @@ import (
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 )
 
-const maxReadBytes = 8000
+const maxReadBytes = DefaultReadPageBytes
 
 type ReadFileTool struct{ workDir string }
 
@@ -53,10 +53,15 @@ func intParam(description string, min, max int) map[string]any {
 }
 
 func (t *ReadFileTool) Definition() schema.ToolDefinition {
+	return t.DefinitionFor(context.Background())
+}
+
+func (t *ReadFileTool) DefinitionFor(ctx context.Context) schema.ToolDefinition {
+	pageBytes := ReadPageBytes(ctx)
 	return definition(t.Name(), "按字节分页读取工作区文件并返回完整文件版本。offset 不是行号；按行定位请用 read_lines。首次阅读需要引用时启用 line_numbers，不要为补编号全文再读。", map[string]any{
 		"path":         stringParam("工作区相对路径，例如 cmd/claw/main.go"),
 		"offset":       intParam("源文件字节起点，默认 0，继续读取使用上次返回的下一段起点", 0, 0),
-		"limit":        intParam("读取的最大源文件字节数，默认 8000；编号正文另有 8000 字节显示上限", 1, maxReadBytes),
+		"limit":        intParam(fmt.Sprintf("读取的最大源文件字节数，默认 %d；编号正文显示上限同为 %d 字节", pageBytes, pageBytes), 1, pageBytes),
 		"line_numbers": map[string]any{"type": "boolean", "description": "显示源文件绝对行号，默认 false；首次阅读需引用时设 true，行中起始标注续行"},
 		"review":       readReviewParam(),
 	}, "path")
@@ -87,6 +92,9 @@ func validateReadReview(review *schema.ReadReview) error {
 }
 
 func parseRead(ctx context.Context, args json.RawMessage) (input readFileArgs, err error) {
+	if err := ValidateReadPageBytes(ScopeFromContext(ctx).ReadPageBytes); err != nil {
+		return input, reject("参数错误", err)
+	}
 	if err := decodeArgs(args, &input, "path"); err != nil {
 		return input, err
 	}
@@ -97,8 +105,8 @@ func parseRead(ctx context.Context, args json.RawMessage) (input readFileArgs, e
 	if err != nil {
 		return input, err
 	}
-	if input.Offset < 0 || (input.Limit != nil && (*input.Limit < 1 || *input.Limit > maxReadBytes)) {
-		return input, reject("参数错误", fmt.Errorf("offset 必须非负，limit 必须在 1 至 %d 之间", maxReadBytes))
+	if input.Offset < 0 || (input.Limit != nil && (*input.Limit < 1 || *input.Limit > ReadPageBytes(ctx))) {
+		return input, reject("参数错误", fmt.Errorf("offset 必须非负，limit 必须在 1 至 %d 之间", ReadPageBytes(ctx)))
 	}
 	if (input.StartLine == nil) != (input.EndLine == nil) {
 		return input, reject("参数错误", fmt.Errorf("start_line 与 end_line 必须同时提供，行号从 1 开始且两端包含；请用 read_lines，例如 {\"path\":\"a.md\",\"start_line\":1,\"end_line\":20}"))
@@ -233,7 +241,7 @@ func (t *ReadFileTool) executeReadSource(ctx context.Context, args json.RawMessa
 	}
 	defer file.Close()
 
-	limit := maxReadBytes
+	limit := ReadPageBytes(ctx)
 	if input.Limit != nil {
 		limit = *input.Limit
 	}
@@ -284,7 +292,7 @@ func (t *ReadFileTool) executeReadSource(ctx context.Context, args json.RawMessa
 	}
 	if numbered {
 		var consumed int
-		body, consumed = numberedContent(window.data, window.prefixLines+1, selected == nil && window.offset > 0 && window.beforeOffset != '\n')
+		body, consumed = numberedContentWithin(window.data, window.prefixLines+1, selected == nil && window.offset > 0 && window.beforeOffset != '\n', ReadPageBytes(ctx))
 		window.data = window.data[:consumed]
 	} else {
 		body = string(bytes.ToValidUTF8(window.data, []byte("�")))
@@ -317,12 +325,17 @@ func (t *ReadFileTool) executeReadSource(ctx context.Context, args json.RawMessa
 	return output + "\n" + body, &schema.ReadReceipt{
 		Path: input.Path, Version: fmt.Sprintf("%x", hash.Sum(nil)),
 		ByteStart: window.offset, ByteEnd: end, FirstLine: firstLine, LastLine: lastLine, TotalBytes: window.total, Review: input.Review,
+		LineBoundary: &schema.ReadBoundary{StartsLine: selected != nil || window.offset == 0 || window.beforeOffset == '\n', EndsLine: end == window.total || len(window.data) > 0 && window.data[len(window.data)-1] == '\n'},
 	}, window.data, nil
 }
 
 // numberedContent 的显示预算包含编号，但 consumed 始终以源文件字节计数。
 // 仅在下一字符也能写入时添加编号，避免截断后出现没有源码的空标签。
 func numberedContent(data []byte, line int, continued bool) (body string, consumed int) {
+	return numberedContentWithin(data, line, continued, DefaultReadPageBytes)
+}
+
+func numberedContentWithin(data []byte, line int, continued bool, pageBytes int) (body string, consumed int) {
 	var out strings.Builder
 	lineStart := true
 	for consumed < len(data) {
@@ -339,7 +352,7 @@ func numberedContent(data []byte, line int, continued bool) (body string, consum
 		if r == utf8.RuneError && size == 1 {
 			text = "�"
 		}
-		if out.Len()+len(prefix)+len(text) > maxReadBytes {
+		if out.Len()+len(prefix)+len(text) > pageBytes {
 			break
 		}
 		out.WriteString(prefix)

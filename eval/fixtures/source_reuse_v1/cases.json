@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "kind": "finite_source_reuse_counterexamples",
+  "annotation": {
+    "method": "source_audit_agent",
+    "reviewer": "codex-quality-first-v1",
+    "independent_human_review": false,
+    "provider_calls": 0,
+    "scripts_executed": false
+  },
+  "sources": [
+    {
+      "id": "formula",
+      "text": "score 范围为 1 至 10，满分 25。原文公式 score / 10 * 25。建议映射 (score - 1) / 9 * 25。\n缺少 score 时使用默认值 5。",
+      "sha256": "dad13608153ba12b2adcdd8609dd51b5bdedaa88198d89dee8d6996c421ab41a"
+    },
+    {
+      "id": "json",
+      "text": "{\"outer\":{\"score\":null,\"enabled\":false,\"count\":0,\"label\":\"\"},\"other\":{\"score\":9},\"a/b\":{\"~name\":5}}",
+      "sha256": "4d0962a9eb1cffeadcc0cf0b6921b573b0f55648ee84f6604505130cb2792a39"
+    },
+    {
+      "id": "version",
+      "text": "V1 的状态 success/failure 在 V2 迁移为 passed/failed；V2 练习使用新目录，不能把并存教学文件直接称为运行冲突。",
+      "sha256": "84e9a79f8fea3cc94dbe437e3230ed1cc3fd63d91b6ada21c4421d0317a916f2"
+    },
+    {
+      "id": "validation",
+      "text": "if data.get(\"id\") and data.get(\"url\") and data.get(\"status\"): score += 5\n已有命令：python check.py good.json；python check.py bad.json。",
+      "sha256": "ae7a8ba2f88e691dc90aa7eabca51840c4af643a701731d281de9fb01c1cff63"
+    }
+  ],
+  "cases": [
+    {
+      "id": "missing_factor",
+      "claim": "建议 (score - 1) / 9 能把 10 映射为 25。",
+      "expected": "fail",
+      "source_ids": [
+        "formula"
+      ],
+      "reason": "代入10只得1，缺少乘25。"
+    },
+    {
+      "id": "correct_fix",
+      "claim": "建议 (score - 1) / 9 * 25 在1与10分别为0与25。",
+      "expected": "pass",
+      "source_ids": [
+        "formula"
+      ],
+      "reason": "固定端点精确算术。"
+    },
+    {
+      "id": "default",
+      "claim": "缺少score时默认5，对应原公式12.5。",
+      "expected": "pass",
+      "source_ids": [
+        "formula"
+      ],
+      "reason": "默认5/10*25=12.5。"
+    },
+    {
+      "id": "wrong_default",
+      "claim": "缺少score时必然崩溃。",
+      "expected": "fail",
+      "source_ids": [
+        "formula"
+      ],
+      "reason": "来源明确默认5。"
+    },
+    {
+      "id": "ast_prose_disagree",
+      "claim": "送检公式含乘25，但报告显示的公式可省略乘25而保持等价。",
+      "expected": "fail",
+      "source_ids": [
+        "formula"
+      ],
+      "reason": "公式显示必须与AST一致。"
+    },
+    {
+      "id": "null_is_present",
+      "claim": "outer/score是存在且值为null，不等于缺失。",
+      "expected": "pass",
+      "source_ids": [
+        "json"
+      ],
+      "reason": "对象明确存在键。"
+    },
+    {
+      "id": "nested_name",
+      "claim": "outer/score的值是9。",
+      "expected": "fail",
+      "source_ids": [
+        "json"
+      ],
+      "reason": "不能把other/score混为同一字段。"
+    },
+    {
+      "id": "pointer_escape",
+      "claim": "Pointer /a~1b/~0name 的值为5。",
+      "expected": "pass",
+      "source_ids": [
+        "json"
+      ],
+      "reason": "严格JSONPointer转义。"
+    },
+    {
+      "id": "json_scope",
+      "claim": "这个JSON样例没有字段x，因此整个系统从未支持x。",
+      "expected": "fail",
+      "source_ids": [
+        "json"
+      ],
+      "reason": "样例对象不能证明全系统否定。"
+    },
+    {
+      "id": "version_boundary",
+      "claim": "V1/V2教学状态不同，必然导致当前V2运行失败。",
+      "expected": "fail",
+      "source_ids": [
+        "version"
+      ],
+      "reason": "未给实际调用证明且存在新目录边界。"
+    },
+    {
+      "id": "truthy_not_legal",
+      "claim": "非空判断验证了ID、URL及状态枚举合法性。",
+      "expected": "fail",
+      "source_ids": [
+        "validation"
+      ],
+      "reason": "非空不等于合法性。"
+    },
+    {
+      "id": "command_omission",
+      "claim": "来源没有任何现成测试命令。",
+      "expected": "fail",
+      "source_ids": [
+        "validation"
+      ],
+      "reason": "来源已有good/bad命令。"
+    }
+  ],
+  "limitations": "仅完整标注文本可判；未知表述not_run。不构成真实模型或通用语义验收。"
+}

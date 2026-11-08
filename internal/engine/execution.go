@@ -38,9 +38,10 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		return schema.ToolResult{}, err
 	}
 
-	mutation := call.Name == "write_file" || call.Name == "edit_file" || call.Name == "bash"
+	mutation := call.Name == "write_report" || call.Name == "write_file" || call.Name == "edit_file" || call.Name == "bash"
+	localRejected := r.rejectLocalCheckCall(ctx, call)
 	key := actionKey(stepID, call)
-	if mutation && !verifier {
+	if mutation && !verifier && localRejected == nil {
 		r.mu.Lock()
 		previous, ok := r.resumeReceipts[key]
 		if stepID != "" && !ok {
@@ -56,10 +57,26 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 	pending := pendingAction{ID: actionID, Call: call, StepID: stepID}
 	var startErr error
 	started := false
-	if mutation {
+	deferred, _ := ctx.Value(deliveryReviewDeferredKey{}).(bool)
+	if deferred {
+		ctx = tools.WithExecutionHook(ctx, func(context.Context) error {
+			return tools.NewRejectedError("delivery_review_required", "delivery_review_required", fmt.Errorf("本批未执行，请先处理交付清单；原写入不会自动重放。可使用已有材料、当前可见核对工具或明确待核实，再正常提交"))
+		})
+	} else if mutation {
 		ctx = tools.WithExecutionHook(ctx, func(dispatchCtx context.Context) error {
 			if call.Name != "bash" {
-				if preview, err := tools.PreviewWrite(dispatchCtx, call); err == nil {
+				var preview tools.FilePreview
+				var previewErr error
+				if call.Name == "write_report" {
+					preview, previewErr = r.reportWritePreview(dispatchCtx)
+				} else {
+					preview, previewErr = tools.PreviewWrite(dispatchCtx, call)
+				}
+				if call.Name == "write_report" && previewErr != nil {
+					startErr = previewErr
+					return previewErr
+				}
+				if previewErr == nil {
 					pending.Before = &fileVersion{Path: preview.Path, Version: preview.Before}
 					pending.Expected = &fileVersion{Path: preview.Path, Version: preview.After}
 				}
@@ -72,6 +89,12 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 					s.Pending = make(map[string]pendingAction)
 				}
 				s.Pending[actionID] = pending
+				if call.Name == "bash" {
+					r.invalidateReadsLocked("", true)
+					r.invalidateMemoryLocked("", "bash_started", true)
+				} else if pending.Before != nil {
+					r.invalidateMemoryLocked(pending.Before.Path, "file_action_started", false)
+				}
 				setEffect(s, EffectReceipt{ActionID: actionID, Tool: call.Name, Effect: schema.EffectUnknown})
 				s.Verification = nil
 				return nil
@@ -85,13 +108,35 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		reporter.OnToolCall(ctx, call.Name, truncateUTF8(string(call.Arguments), 200))
 		r.reportMu.Unlock()
 	}
-	if rejected := r.rejectDuplicateRead(ctx, call); rejected != nil {
+	if localRejected != nil {
+		result = *localRejected
+		observe.Emit(ctx, "tool_attempted", observe.Payload{Tool: call.Name, ToolCallID: call.ID, RequestDigest: observe.Digest(string(call.Arguments))})
+		observe.Emit(ctx, "tool_admission", observe.Payload{Tool: call.Name, Decision: "rejected", ErrorClass: result.ErrorCode, Stage: "local_check_batch"})
+		observe.Emit(ctx, "tool_finished", observe.Payload{Tool: call.Name, Status: string(result.Status), Effect: string(result.Effect), ErrorClass: result.ErrorCode})
+	} else if r.qualityEnabled() && r.state.Quality != nil && r.state.Quality.DraftID != "" && call.Name != "write_report" && call.Name != "verify_findings" {
+		result = schema.NewToolResult(call.ID, "质量草稿已登记，探索工具已关闭", schema.ToolRejected, schema.EffectNone, "质量准入拒绝", nil)
+		result.ErrorCode = "quality_contract_invalid"
+	} else if rejected := r.rejectDuplicateRead(ctx, call); rejected != nil {
 		result = *rejected
 		observe.Emit(ctx, "tool_attempted", observe.Payload{Tool: call.Name, ToolCallID: call.ID, RequestDigest: observe.Digest(string(call.Arguments))})
 		observe.Emit(ctx, "tool_admission", observe.Payload{Tool: call.Name, Decision: "rejected", ErrorClass: result.ErrorCode, Stage: "read_reuse"})
 		observe.Emit(ctx, "tool_finished", observe.Payload{Tool: call.Name, Status: string(result.Status), Effect: string(result.Effect), ErrorClass: result.ErrorCode})
 	} else {
 		result = registry.Execute(ctx, call)
+	}
+	if call.Name == "write_report" && !started && result.Status != schema.ToolSucceeded {
+		result.Status, result.Effect, result.IsError = schema.ToolRejected, schema.EffectNone, true
+		if result.ErrorCode == "" {
+			result.ErrorCode = "report_invalid"
+		}
+		r.mu.Lock()
+		if r.state.Quality != nil && r.state.Quality.ErrorCode != "" {
+			result.ErrorCode = r.state.Quality.ErrorCode
+		}
+		if r.state.Report != nil && r.state.Report.ErrorCode != "" {
+			result.ErrorCode = r.state.Report.ErrorCode
+		}
+		r.mu.Unlock()
 	}
 	bindRead(ctx, actionID, &result)
 	if err := r.captureAnalysisRead(ctx, actionID, &result); err != nil {
@@ -117,7 +162,7 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 			}
 		}
 	}
-	if len(result.Output) > 12000 && r.artifact != nil && !((r.analysisEnabled() || r.efficiencyEnabled()) && result.Read != nil) {
+	if len(result.Output) > 12000 && r.artifact != nil && !(result.Read != nil) {
 		id := newID()
 		if err := r.artifact(id, []byte(result.Output)); err != nil {
 			// 执行观察仍可交付，但持久化失败后不能宣称证据已保存。
@@ -130,6 +175,16 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		}
 		observe.Emit(ctx, "artifact_saved", observe.Payload{Tool: call.Name, ArtifactID: id, ContentBytes: int64(len(result.Output))})
 		result.Output = truncateUTF8(result.Output, 4000) + "\n完整结果引用：" + id + "（可用 read_evidence 分段读取）"
+	}
+	// 仅对本次确认写入附加非阻断提示，不改变业务身份、权限、预算或文件效果。
+	r.attachDeliveryContentReview(ctx, call, &result)
+	if storageErr := r.storageError(); storageErr != nil {
+		if started {
+			r.mu.Lock()
+			setEffect(&r.state, effectReceipt(pending, result))
+			r.mu.Unlock()
+		}
+		return result, storageErr
 	}
 	if err := r.record("action_result", func(s *taskState) error {
 		if started {
@@ -145,6 +200,7 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		r.rememberAnalysisReadLocked(result)
 		if started {
 			setEffect(s, effectReceipt(pending, result))
+			recordDeliveryReviewContent(s, r.runID, pending, result)
 		}
 		if !unknown {
 			delete(s.Pending, actionID)
@@ -164,6 +220,20 @@ func (e *AgentEngine) execute(ctx context.Context, r *runState, registry tools.R
 		return nil
 	}); err != nil {
 		return result, err
+	}
+	if call.Name == "write_report" && started {
+		if err := r.completeReportWrite(ctx, actionID, result); err != nil {
+			return result, err
+		}
+	}
+	if call.Name == "write_report" && !started && result.Status != schema.ToolSucceeded {
+		if r.qualityEnabled() {
+			if result.ErrorCode != "" {
+				return result, qualityError(result.ErrorCode, result.Output)
+			}
+			return result, r.qualityFailure(result.Output)
+		}
+		return result, r.reportFailure(result.Output)
 	}
 	if reporter != nil {
 		r.reportMu.Lock()
@@ -198,6 +268,10 @@ func (evidenceTool) Definition() schema.ToolDefinition {
 	}
 }
 func (evidenceTool) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
+	output, _, _, err := (evidenceTool{}).ExecuteReadSource(ctx, raw)
+	return output, err
+}
+func (evidenceTool) executeLegacy(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args struct {
 		ID     string `json:"id"`
 		Offset int    `json:"offset"`
@@ -216,9 +290,22 @@ func (evidenceTool) Execute(ctx context.Context, raw json.RawMessage) (string, e
 	if r == nil || r.readArtifactPage == nil {
 		return "", fmt.Errorf("当前没有任务证据可读取")
 	}
-	if known, allowed := r.handoffArtifactAccess(ctx, args.ID); known && !allowed {
+	handoffKnown, handoffAllowed := r.handoffArtifactAccess(ctx, args.ID)
+	if handoffKnown && !handoffAllowed {
 		return "", fmt.Errorf("报告材料超出当前父任务或路径权限")
 	}
+	sourceKnown, sourceAllowed := r.sourceArtifactAccess(ctx, args.ID)
+	checkKnown, checkAllowed, _ := r.localCheckMaterialAccess(ctx, args.ID)
+	if checkKnown && !checkAllowed {
+		return "", fmt.Errorf("核对材料超出当前Agent或路径权限")
+	}
+	if sourceKnown && !sourceAllowed {
+		return "", fmt.Errorf("原文材料超出当前Agent或路径权限")
+	}
+	if observe.Identity(ctx).ParentAgentID != "" && !handoffKnown && !sourceKnown && !checkKnown {
+		return "", fmt.Errorf("子任务不能读取来源未授权的材料")
+	}
+
 	page, err := r.readArtifactPage(args.ID, args.Offset, args.Limit)
 	if err != nil {
 		return "", err
@@ -238,6 +325,9 @@ func NewExplorerRegistry(workDir string) tools.Registry {
 	r.Register(tools.NewReadLinesTool(workDir))
 	r.Register(tools.NewListDirTool(workDir))
 	r.Register(tools.NewSearchTextTool(workDir))
+	r.Register(verifyFindingsTool{})
+	r.Register(evidenceTool{})
+	r.Register(localCheckTool{})
 	return r
 }
 
@@ -246,7 +336,7 @@ func NewWorkspaceRegistry(workDir string) tools.Registry {
 	r.Register(tools.NewWriteFileTool(workDir))
 	r.Register(tools.NewEditFileTool(workDir))
 	r.Register(tools.NewBashTool(workDir))
-	r.Register(evidenceTool{})
 	r.Register(readReportTool{})
+	r.Register(reportTool{})
 	return r
 }

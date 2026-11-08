@@ -1,0 +1,545 @@
+{
+  "schema_version": 1,
+  "kind": "finite_labeled_semantic_oracle",
+  "fixture_version": 3,
+  "source_task": "read_features_v2_sanitized_cases",
+  "source_workspace": "eval/fixtures/write_efficiency_v1/workspace",
+  "annotation": {
+    "reviewer": "source_audit_agent:codex-read-features-v2",
+    "method": "source_audit_agent",
+    "independent_human_review": false,
+    "course_code_executed": false,
+    "provider_calls": 0
+  },
+  "matching": "只匹配完整已标注claim文本（忽略外层空白）；不按关键词猜测新结论。",
+  "limitations": [
+    "仅验证六类固定反例和完整已标注claim；未知表述为not_run。",
+    "机械引用通过不代替语义正确，有限标注不冒充真实模型质量或独立人工评审。",
+    "缺页范围是根据症状重建的脱敏合成前提，不是完整历史轨迹回放。",
+    "oracle读取完整冻结原文仅用于评分，不为被评Agent补造读取依据。",
+    "未执行课程脚本、OpenCode宿主、Hook或截图检查。",
+    "原文数值转述与按当前代码静态推导分开；漏报矛盾属于rubric遗漏，不伪造产物claim。"
+  ],
+  "assumptions": [
+    {
+      "id": "static_hook_review",
+      "kind": "static_review_only",
+      "host_executed": false,
+      "course_code_executed": false,
+      "screenshots_reviewed": false
+    },
+    {
+      "id": "quality_tail_353",
+      "kind": "synthetic_reading_coverage",
+      "source_id": "quality",
+      "source_sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617",
+      "total_bytes": 14038,
+      "read_ranges": [
+        {
+          "start": 0,
+          "end": 6944
+        },
+        {
+          "start": 6944,
+          "end": 13685
+        }
+      ],
+      "expected_missing": [
+        {
+          "start": 13685,
+          "end": 14038
+        }
+      ],
+      "expected_missing_bytes": 353,
+      "complete_historical_replay": false
+    },
+    {
+      "id": "nested_score_two",
+      "kind": "static_input",
+      "input": {
+        "analysis": {
+          "relevance_score": 2
+        }
+      },
+      "default_score": 5,
+      "denominator": 10,
+      "max_score": 25,
+      "expected_current_mapped": 12.5,
+      "expected_nested_mapped": 5,
+      "course_code_executed": false
+    },
+    {
+      "id": "static_good_score",
+      "kind": "static_score_components",
+      "components": {
+        "summary": "25",
+        "depth": "22.5",
+        "format": "20",
+        "tags": "15",
+        "hollow": "15"
+      },
+      "expected_total": "97.5",
+      "course_code_executed": false
+    },
+    {
+      "id": "static_bad_score",
+      "kind": "static_score_components",
+      "components": {
+        "summary": "5",
+        "depth": "12.5",
+        "format": "12",
+        "tags": "0",
+        "hollow": "0"
+      },
+      "expected_total": "29.5",
+      "course_code_executed": false
+    }
+  ],
+  "sources": [
+    {
+      "id": "validator",
+      "path": "05资料包/md版/第 5 节 实操 1：编写 JSON 格式校验脚本.md",
+      "sha256": "cc1a7e3ba33457c8647101619376d547acc582f912cb3f034905f9f04684ad52",
+      "evidence": [
+        {
+          "id": "v2_boundary",
+          "start_line": 4,
+          "end_line": 4,
+          "quote": "从这里开始，你可以把第一周的内容复制到一个新目录，开始制作第二周升级版v2。本周目标实现自动化运营。",
+          "quote_sha256": "9d6f1076d42e84dff97529ad159559b70bfcb31258ec014ebf750e66d2b0d7e4"
+        },
+        {
+          "id": "status_enum",
+          "start_line": 81,
+          "end_line": 82,
+          "quote": "# 合法的 status 值\nVALID_STATUSES = {\"draft\", \"review\", \"published\", \"archived\"}",
+          "quote_sha256": "e1a7e6e7f6e6962fb326c14a0cc16fd32c13c5ecd4b11e93006ead4226851abc"
+        }
+      ]
+    },
+    {
+      "id": "quality",
+      "path": "05资料包/md版/第 5 节 实操 2：编写质量评分脚本.md",
+      "sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617",
+      "evidence": [
+        {
+          "id": "score_default",
+          "start_line": 164,
+          "end_line": 174,
+          "quote": "def score_tech_depth(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 2：技术深度（25 分）— 基于文章 score 字段（1-10 映射）。\"\"\"\n    max_score = 25.0\n    article_score = data.get(\"score\", 5)\n\n    if not isinstance(article_score, (int, float)):\n        return DimensionScore(\"技术深度\", 10, max_score, \"score 字段类型异常\")\n\n    mapped = (article_score / 10) * max_score\n    detail = f\"文章评分 {article_score}/10 → {mapped:.1f}/{max_score}\"\n    return DimensionScore(\"技术深度\", round(mapped, 1), max_score, detail)",
+          "quote_sha256": "560917496d6a1b4e630a458e36d8e368b452bc6b730a01d381f4555770f1c19f"
+        },
+        {
+          "id": "usage_commands",
+          "start_line": 48,
+          "end_line": 50,
+          "quote": "用法：\n    python hooks/check_quality.py knowledge/articles/github-20260317-001.json\n    python hooks/check_quality.py knowledge/articles/*.json",
+          "quote_sha256": "5ae7eaacf15613bc75839956d85478aaad56b9dee3918f54f0679ed801eb68cd"
+        },
+        {
+          "id": "test_commands",
+          "start_line": 377,
+          "end_line": 385,
+          "quote": "## 2.3 运行质量评分\n\n```plain\n# 逐个检查\npython hooks/check_quality.py knowledge/articles/test-quality-good.json\npython hooks/check_quality.py knowledge/articles/test-quality-bad.json\n\n# 批量检查（支持通配符）\npython hooks/check_quality.py knowledge/articles/*.json",
+          "quote_sha256": "1ebb673d4f2ad0f2d7793e94e68562682fa25ff711c24ac7ca49069151bddc58"
+        },
+        {
+          "id": "quality_tail_cleanup",
+          "start_line": 401,
+          "end_line": 425,
+          "quote": "|标签不足被扣分|是||\n\n\n---\n\n## 2.4 清理测试文件\n\n```plain\nrm knowledge/articles/test-quality-*.json\n\n---\n```\n\n\n## 提交到 Git\n\n```plain\ngit add hooks/check_quality.py\ngit commit -m \"feat: add content quality scoring hook\"\n\n---\n```\n\n\n**完成！** 两个质量校验脚本都写好了，进入实操 3 配置 Plugin Hook（选修）。",
+          "quote_sha256": "fb44f9b63fe2fd22b65d591fe515768c64a66e900dbad698becbb25f36fb4d06"
+        },
+        {
+          "id": "quality_scoring_rules",
+          "start_line": 65,
+          "end_line": 85,
+          "quote": "# ── 空洞词列表 ───────────────────────────────────────────────────────────\n\nHOLLOW_WORDS_ZH = [\n    \"赋能\", \"抓手\", \"闭环\", \"打通\", \"全链路\", \"底层逻辑\",\n    \"颗粒度\", \"对齐\", \"拉通\", \"沉淀\", \"强大的\", \"革命性的\",\n]\n\nHOLLOW_WORDS_EN = [\n    \"groundbreaking\", \"revolutionary\", \"game-changing\", \"cutting-edge\",\n    \"state-of-the-art\", \"leverage\", \"synergy\", \"paradigm shift\",\n    \"disruptive\", \"next-generation\", \"world-class\",\n]\n\nHOLLOW_WORDS = HOLLOW_WORDS_ZH + HOLLOW_WORDS_EN\n\n# ── 合法标签列表 ─────────────────────────────────────────────────────────\n\nVALID_TAGS = {\n    \"agent\", \"rag\", \"mcp\", \"llm\", \"fine-tuning\", \"prompt-engineering\",\n    \"multi-agent\", \"tool-use\", \"evaluation\", \"deployment\", \"security\",\n    \"reasoning\", \"code-generation\", \"vision\", \"audio\", \"robotics\",",
+          "quote_sha256": "ed1f069909fa4b1e8ed1888de0f0023027995db1d2e02707dffc4015accc420a"
+        },
+        {
+          "id": "summary_formula",
+          "start_line": 131,
+          "end_line": 161,
+          "quote": "def score_summary_quality(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 1：摘要质量（25 分）— >= 50 字满分，含技术关键词有奖励。\"\"\"\n    max_score = 25.0\n    summary = data.get(\"summary\", \"\").strip()\n\n    if not summary:\n        return DimensionScore(\"摘要质量\", 0, max_score, \"无摘要\")\n\n    length = len(summary)\n    if length >= 50:\n        base = 20.0\n        detail = f\"长度充足 ({length} 字)\"\n    elif length >= 20:\n        base = 15.0\n        detail = f\"长度基本 ({length} 字)\"\n    else:\n        base = 5.0\n        detail = f\"太短 ({length} 字)\"\n\n    # 技术关键词奖励（+5 分封顶）\n    tech_keywords = [\n        \"模型\", \"训练\", \"推理\", \"API\", \"框架\", \"agent\", \"LLM\", \"RAG\",\n        \"token\", \"向量\", \"embedding\", \"transformer\", \"微调\",\n    ]\n    keyword_count = sum(1 for kw in tech_keywords if kw.lower() in summary.lower())\n    bonus = min(5.0, keyword_count * 1.0)\n    if bonus > 0:\n        detail += f\", 含 {keyword_count} 个技术关键词\"\n\n    score = min(max_score, base + bonus)\n    return DimensionScore(\"摘要质量\", score, max_score, detail)",
+          "quote_sha256": "a240acab9c6c1d068bd6c02a355aea8767c162cba497afa0cfc58b0af471c98d"
+        },
+        {
+          "id": "format_presence",
+          "start_line": 177,
+          "end_line": 195,
+          "quote": "def score_format(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 3：格式规范（20 分）— id/title/source_url/status/时间戳各 4 分。\"\"\"\n    max_score = 20.0\n    score = 0.0\n    checks: list[str] = []\n\n    for field_name, points in [(\"id\", 4), (\"title\", 4), (\"source_url\", 4), (\"status\", 4)]:\n        if data.get(field_name, \"\") and str(data[field_name]).strip():\n            score += points\n        else:\n            checks.append(f\"缺少 {field_name}\")\n\n    if data.get(\"updated_at\") or data.get(\"collected_at\"):\n        score += 4\n    else:\n        checks.append(\"缺少时间戳\")\n\n    detail = \"完整\" if not checks else \"缺失: \" + \", \".join(checks)\n    return DimensionScore(\"格式规范\", score, max_score, detail)",
+          "quote_sha256": "5be797a24143dc9cfc22fe109a3f9ce91e4c995443865ed7b8f3332b73f11dbb"
+        },
+        {
+          "id": "tag_hollow_formula",
+          "start_line": 198,
+          "end_line": 241,
+          "quote": "def score_tags(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 4：标签精度（15 分）— 1-3 个合法标签最佳。\"\"\"\n    max_score = 15.0\n    tags = data.get(\"tags\", [])\n\n    if not tags:\n        return DimensionScore(\"标签精度\", 0, max_score, \"无标签\")\n\n    valid_count = sum(1 for t in tags if t in VALID_TAGS)\n    total_count = len(tags)\n\n    if 1 <= total_count <= 3 and valid_count == total_count:\n        score = 15.0\n        detail = f\"{total_count} 个标签，全部合法\"\n    elif valid_count > 0:\n        score = 10.0\n        detail = f\"{valid_count}/{total_count} 个合法标签\"\n    else:\n        score = 5.0\n        detail = f\"有 {total_count} 个标签但均不在标准列表\"\n\n    if total_count > 5:\n        penalty = min(5.0, (total_count - 5) * 1.0)\n        score = max(0, score - penalty)\n        detail += f\", 标签过多 (扣 {penalty} 分)\"\n\n    return DimensionScore(\"标签精度\", score, max_score, detail)\n\n\ndef score_hollow_words(data: dict[str, Any]) -> DimensionScore:\n    \"\"\"维度 5：空洞词检测（15 分）— 每出现一个空洞词扣 3 分。\"\"\"\n    max_score = 15.0\n    text = (data.get(\"summary\", \"\") + \" \" + data.get(\"title\", \"\")).lower()\n\n    found = [word for word in HOLLOW_WORDS if word.lower() in text]\n    penalty = min(max_score, len(found) * 3.0)\n    score = max_score - penalty\n\n    if found:\n        detail = f\"发现 {len(found)} 个空洞词: {', '.join(found[:5])}\"\n    else:\n        detail = \"未发现空洞词\"\n\n    return DimensionScore(\"空洞词检测\", score, max_score, detail)",
+          "quote_sha256": "284beb30617c783a6f8477546114ea3bb4ceddceb3abeef82035063ee439c9bc"
+        },
+        {
+          "id": "quality_sample_good",
+          "start_line": 348,
+          "end_line": 357,
+          "quote": "{\n  \"id\": \"github-20260310-001\",\n  \"title\": \"OpenCode — 开源 AI 编程终端\",\n  \"source_url\": \"https://github.com/nicepkg/opencode\",\n  \"summary\": \"开源 AI 编程终端工具，MIT 协议，支持 100+ 模型直连，基于 Go 语言的 agent 框架，支持 LLM 推理和 RAG 检索\",\n  \"tags\": [\"agent\", \"tool-use\", \"code-generation\"],\n  \"status\": \"review\",\n  \"score\": 9,\n  \"collected_at\": \"2026-03-10T08:00:00Z\"\n}",
+          "quote_sha256": "9d0f746b0624a1c980eb1c1172c048b0e39f82d5182bfb8195ea57756c67a2e1"
+        },
+        {
+          "id": "quality_sample_bad",
+          "start_line": 363,
+          "end_line": 368,
+          "quote": "{\n  \"id\": \"bad\",\n  \"title\": \"一个赋能全链路的革命性的项目\",\n  \"summary\": \"底层逻辑打通闭环\",\n  \"status\": \"review\"\n}",
+          "quote_sha256": "6166bad786f04f2681ba0819fabb68bd6f70f61aebd5f563f7b6bf7d93da8c11"
+        },
+        {
+          "id": "quality_reported_numbers",
+          "start_line": 387,
+          "end_line": 389,
+          "quote": "**高质量条目评分结果（84.5 分，A 级）：**\n![图片](第 5 节 实操 2：编写质量评分脚本/3.png)\n**低质量条目评分结果（39.5 分，C 级）：**",
+          "quote_sha256": "d5e3d87381005d36d55e41a82f22c7a406933874c3dd8651c4e0a97d271723da"
+        }
+      ]
+    },
+    {
+      "id": "hook",
+      "path": "05资料包/md版/第 5 节 实操任务3：配置 Hook 观察反馈循环（选修）.md",
+      "sha256": "33b776796dab38fa64e8d7af0c0046079d8630ae2edecf562474125c317bf993",
+      "evidence": [
+        {
+          "id": "hook_reference_implementation",
+          "start_line": 107,
+          "end_line": 129,
+          "quote": "export const ValidateHook: Plugin = async ({ $ }) => {\n  return {\n    \"tool.execute.after\": async (input) => {\n      const tool = input.tool\n      const filePath = input.args?.file_path ?? input.args?.filePath ?? \"\"\n\n      // 只对 knowledge/articles/ 下的 JSON 文件触发\n      if (\n        (tool === \"write\" || tool === \"edit\") &&\n        typeof filePath === \"string\" &&\n        filePath.includes(\"knowledge/articles/\") &&\n        filePath.endsWith(\".json\")\n      ) {\n        try {\n          // 调用 Python 校验脚本\n          await $`python3 hooks/validate_json.py ${filePath}`.nothrow()\n        } catch {\n          // 吞掉异常，避免阻塞 OpenCode\n        }\n      }\n    },\n  }\n}",
+          "quote_sha256": "bb08ac822177ff1d5be4aa86122e613b493c16edaafaaa4124c2f85b03c1e2fc"
+        },
+        {
+          "id": "hook_manual_feedback",
+          "start_line": 46,
+          "end_line": 55,
+          "quote": "### Step C：把错误反馈给 Agent（如有错误）\n\n**完整地**把校验输出粘贴回 OpenCode（不要只描述，要粘贴原文）：\n\n```plain\n刚才创建的 test-loop.json 校验不通过，错误如下：\n\n[粘贴你实际看到的校验输出]\n\n请重新读取 AGENTS.md 中的「知识条目格式」部分，对照修正这个文件。",
+          "quote_sha256": "59a08d31c5386a2f60e511021f060308441ca284e88bd727f157b89304b034c2"
+        },
+        {
+          "id": "hook_host_boundary",
+          "start_line": 155,
+          "end_line": 174,
+          "quote": "### Step 3：验证 Hook 是否生效\n\n重启 OpenCode（插件在启动时加载）：\n\n```plain\ncd ~/ai-knowledge-base\nopencode\n```\n让 Agent 写入一个新的知识条目：\n```plain\n请先读取 AGENTS.md 中的「知识条目格式」，\n然后创建一个关于 Harness Engineering 的知识条目，\n保存到 knowledge/articles/hook-test.json。\n所有必填字段都要有，status 设为 \"draft\"。\n```\n>[截图占位：如果 Hook 生效，你会看到校验脚本的输出自动打印]\n![图片](第 5 节 实操任务3：配置 Hook 观察反馈循环（选修）/1.png)\n![图片](第 5 节 实操任务3：配置 Hook 观察反馈循环（选修）/2.png)\n![图片](第 5 节 实操任务3：配置 Hook 观察反馈循环（选修）/3.png)\n**如果 Hook 没有自动触发**——不用担心，可能是 OpenCode 版本差异。 手动跑 `python3 hooks/validate_json.py knowledge/articles/hook-test.json` 完全 OK。 **重要的不是自动化本身，而是你理解了闭环的概念。**",
+          "quote_sha256": "db99f7ce4668307520178664ab313e03bd77aa6ebaffd4076de8364d77bdffa0"
+        }
+      ]
+    },
+    {
+      "id": "v1_format",
+      "path": "02资料包/md版/第 2 节 实操任务1：为知识库项目编写 AGENTS.md.md",
+      "sha256": "fe3f84f0de65e1db2ae501a6fc4d65d056c5e561dd024e0c91431d5037d50d7d",
+      "evidence": [
+        {
+          "id": "v1_nested_score_and_status",
+          "start_line": 115,
+          "end_line": 125,
+          "quote": "  \"analysis\": {\n    \"tech_highlights\": [\"多 Agent 路由\", \"50+ 平台支持\"],\n    \"relevance_score\": 9\n  },\n  \"tags\": [\"agent\", \"runtime\", \"open-source\"],\n  \"status\": \"draft\"\n}\n```\n\n**必填字段**：id, title, source_url, summary, tags, status\n**status 可选值**：draft / reviewed / published",
+          "quote_sha256": "cf3c6605d5dfaed05c926f61aa9491c8a9bca3d0d51a61cdef6b9c4b5b84fe61"
+        }
+      ]
+    },
+    {
+      "id": "organizer_contract",
+      "path": "04资料包/md版/第 4 节 实操任务2：跑通 V1 完整流程.md",
+      "sha256": "35e5dac5b0f65291fdfa8514e8034498238bd84871aac4bd2f88c6ad6db6fe2f",
+      "evidence": [
+        {
+          "id": "organizer_article_fields",
+          "start_line": 77,
+          "end_line": 77,
+          "quote": "2. 格式化为标准 JSON（包含 id, title, source_url, summary, tags, status 字段）",
+          "quote_sha256": "49026f6822b9972d21c79b9774533d2b41ff3fa655e76ea24279e610fa1f160c"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "v2_status_migration",
+      "description": "第一周资料与第二周V2校验器的版本边界；不能拿旧枚举替代新枚举。",
+      "evidence_ids": [
+        "v2_boundary",
+        "status_enum",
+        "v1_nested_score_and_status"
+      ],
+      "claims": [
+        {
+          "id": "v2_status_supported",
+          "text": "第5节进入V2；其校验器允许draft、review、published、archived，不允许reviewed。",
+          "expected_result": "pass",
+          "reason": "V2声明与合法枚举均能在对应原文直接定位。"
+        },
+        {
+          "id": "v2_wrong_status",
+          "text": "第5节V2校验器的合法状态是draft、reviewed、published，review必须改成reviewed。",
+          "expected_result": "fail",
+          "reason": "把V1口径套到V2，且遗漏archived。"
+        }
+      ]
+    },
+    {
+      "id": "optional_score_default",
+      "description": "缺少顶层score时使用默认值，并保留迁移影响。",
+      "evidence_ids": [
+        "score_default"
+      ],
+      "derived_value": {
+        "description": "根据已标注代码常量进行静态算术核对，不执行课程代码。",
+        "default_score": 5,
+        "denominator": 10,
+        "max_score": 25,
+        "expected_mapped": 12.5
+      },
+      "claims": [
+        {
+          "id": "score_default_mapped",
+          "text": "当缺少顶层score时，技术深度函数会按默认5计算，映射为12.5/25，不因缺失该可选字段直接报错。",
+          "expected_result": "pass",
+          "reason": "data.get(\"score\",5)取5，通过数值类型判断后按5/10*25映射。"
+        },
+        {
+          "id": "score_missing_raises",
+          "text": "缺少顶层score时，评分脚本会直接报错，无法生成质量评分。",
+          "expected_result": "fail",
+          "reason": "忽略.get的默认值；本函数不会仅因该字段缺失而报错。"
+        }
+      ]
+    },
+    {
+      "id": "existing_test_commands",
+      "description": "已存在的python命令不能描述为缺失，也不能改写成原文python3。",
+      "evidence_ids": [
+        "usage_commands",
+        "test_commands"
+      ],
+      "claims": [
+        {
+          "id": "commands_exist",
+          "text": "质量评分文档已提供python hooks/check_quality.py的单条、批量及good/bad测试命令；这些是已有说明，不是缺失的测试入口。",
+          "expected_result": "pass",
+          "reason": "用法段与2.3运行段均有明确命令。"
+        },
+        {
+          "id": "commands_missing",
+          "text": "原文没有任何check_quality.py测试命令，需要从零补充。",
+          "expected_result": "fail",
+          "reason": "忽略49-50及381-385行已有命令。"
+        }
+      ]
+    },
+    {
+      "id": "hook_static_vs_runtime",
+      "description": "只确认参考实现中显式代码，宿主输出转交及自动修复需要实测。",
+      "evidence_ids": [
+        "hook_reference_implementation",
+        "hook_manual_feedback",
+        "hook_host_boundary"
+      ],
+      "assumption_ids": [
+        "static_hook_review"
+      ],
+      "claims": [
+        {
+          "id": "hook_static_implementation",
+          "text": "在本离线静态审查中，参考插件显式调用校验脚本并使用.nothrow()和try/catch；该函数没有显式解析校验输出并转交给Agent的代码，宿主是否转交输出仍需实测。",
+          "expected_result": "pass",
+          "reason": "107–129行为完整参考函数；能核对显式调用和异常处理，不能由该函数省略某代码推出宿主绝不转交输出。"
+        },
+        {
+          "id": "hook_runtime_overclaim",
+          "text": "仅凭参考插件代码即可确定当前宿主永远不会把校验输出反馈给模型。",
+          "expected_result": "fail",
+          "reason": "把静态实现缺少显式转交扩大成未经验证的宿主运行事实；本场景没有执行宿主或检查实际回执。"
+        },
+        {
+          "id": "hook_existing_manual_loop",
+          "text": "Hook资料已经给出手动把完整校验输出粘贴给Agent再修正的步骤；自动转交和修复是否生效属于另需实测的边界。",
+          "expected_result": "pass",
+          "reason": "46–55行已有手动反馈流程；155–174行要求验证Hook并说明版本差异，不能说资料完全没有反馈步骤。"
+        }
+      ]
+    },
+    {
+      "id": "unread_tail_absence",
+      "description": "脱敏症状场景重建：缺少末尾353字节，不是完整历史轨迹回放。",
+      "evidence_ids": [
+        "quality_tail_cleanup"
+      ],
+      "assumption_ids": [
+        "quality_tail_353"
+      ],
+      "claims": [
+        {
+          "id": "tail_gap_is_not_complete",
+          "text": "在固定离线缺页场景中，质量评分文档只覆盖[0,13685)，总长14038字节，末尾353字节未读，不能据此前缀声称全文已完整阅读。",
+          "expected_result": "pass",
+          "reason": "合成回执的区间并集为[0,13685)，缺口为[13685,14038)；不能用已读取前缀证明整文件读取完整。"
+        },
+        {
+          "id": "tail_absence_claim_invalid",
+          "text": "在固定离线缺页场景中，仅凭已读取的前13685字节即可断言质量评分全文不存在清理测试文件和Git提交说明。",
+          "expected_result": "fail",
+          "reason": "该场景没有读取401–425行，而原文406–419行确实包含清理命令与Git提交；否定结论越过了实际读取边界。"
+        },
+        {
+          "id": "tail_full_source_has_cleanup",
+          "text": "原始质量评分文档的末尾包含清理测试文件和Git提交说明；固定离线缺页场景不能把这些未读内容作为Agent当时已经掌握的依据。",
+          "expected_result": "pass",
+          "reason": "固定oracle可以审计完整冻结原文，但这不为模拟Agent补造读取回执或认知资格。"
+        }
+      ]
+    },
+    {
+      "id": "score_error_severity",
+      "description": "缺字段的静默默认偏差与必然运行崩溃分开。",
+      "evidence_ids": [
+        "score_default",
+        "v1_nested_score_and_status"
+      ],
+      "assumption_ids": [
+        "nested_score_two"
+      ],
+      "claims": [
+        {
+          "id": "score_silent_bias",
+          "text": "对于只有analysis.relevance_score=2而没有顶层score的固定输入，现有技术深度函数会取默认5并得到12.5/25，而按嵌套值映射应为5/25；这是静默偏差，不能仅因顶层score缺失归为必然崩溃。",
+          "expected_result": "pass",
+          "reason": "当前.get读取缺失顶层键时返回5，5/10*25=12.5；若目标是读取嵌套2，则2/10*25=5。该条件只说明分数偏高7.5，不证明完整脚本实际执行结果。"
+        },
+        {
+          "id": "score_missing_always_crashes",
+          "text": "只要顶层score缺失，即使嵌套分数存在，技术深度函数也必然抛KeyError并中断整个流程，因此应一律列为直接中断的P0。",
+          "expected_result": "fail",
+          "reason": "当前代码使用.get默认值而非必需键索引；忽略默认行为，把条件性数据偏差误标为必然崩溃。"
+        }
+      ]
+    },
+    {
+      "id": "sample_number_restatement",
+      "description": "原文结果可准确转述；不能被误判为静态算术结论。",
+      "evidence_ids": [
+        "quality_reported_numbers"
+      ],
+      "assumption_ids": [],
+      "claims": [
+        {
+          "id": "sample_number_restatement_0",
+          "text": "原文标注高质量条目84.5分、低质量条目39.5分。",
+          "expected_result": "pass",
+          "reason": "387和389行直接给出这些数值；仅转述原文不表示认可代码推导。"
+        },
+        {
+          "id": "sample_number_restatement_1",
+          "text": "当前代码静态计算可推出示例good为84.5分、bad为39.5分。",
+          "expected_result": "fail",
+          "reason": "该表述把原文标注冒充当前代码的推导结果。"
+        }
+      ]
+    },
+    {
+      "id": "sample_static_numbers",
+      "description": "固定示例按当前五维代码静态核对，保持未执行边界。",
+      "evidence_ids": [
+        "quality_scoring_rules",
+        "summary_formula",
+        "score_default",
+        "format_presence",
+        "tag_hollow_formula",
+        "quality_sample_good",
+        "quality_sample_bad",
+        "quality_reported_numbers"
+      ],
+      "assumption_ids": [
+        "static_good_score",
+        "static_bad_score"
+      ],
+      "claims": [
+        {
+          "id": "sample_static_numbers_0",
+          "text": "按当前文档代码静态推导，good为97.5分，bad为29.5分，与原文标注84.5和39.5不一致；未执行课程脚本。",
+          "expected_result": "pass",
+          "reason": "good=25+22.5+20+15+15；bad=5+12.5+12+0+0，使用Decimal核对冻结常量。"
+        },
+        {
+          "id": "sample_static_numbers_1",
+          "text": "已经实际运行课程脚本，验证good为97.5分、bad为29.5分。",
+          "expected_result": "fail",
+          "reason": "本标注未执行课程代码，不能把静态推导冒充实际执行。"
+        }
+      ]
+    },
+    {
+      "id": "score_format_presence_only",
+      "description": "score_format不负责ID/URL/状态枚举合法性。",
+      "evidence_ids": [
+        "format_presence",
+        "quality_sample_bad"
+      ],
+      "assumption_ids": [],
+      "claims": [
+        {
+          "id": "score_format_presence_only_0",
+          "text": "score_format只按字段非空和时间戳存在计分，不验证ID格式、URL或状态枚举是否合法。",
+          "expected_result": "pass",
+          "reason": "代码只使用truthy/strip存在性检查，没有合法性验证。"
+        },
+        {
+          "id": "score_format_presence_only_1",
+          "text": "score_format会验证ID格式、URL和状态枚举是否合法。",
+          "expected_result": "fail",
+          "reason": "把格式字段存在性加分误当为语义合法性校验。"
+        }
+      ]
+    },
+    {
+      "id": "timestamp_subject",
+      "description": "主体身份与字段缺失分开检查，来源为实际完整JSON对象。",
+      "evidence_ids": [
+        "quality_sample_good",
+        "quality_sample_bad",
+        "format_presence"
+      ],
+      "claims": [
+        {
+          "id": "good_timestamp_present",
+          "text": "good样例包含collected_at，按当前格式计分代码可获得时间戳4分。",
+          "expected_result": "pass",
+          "reason": "quality_sample_good包含非空collected_at；format_presence的or条件成立。"
+        },
+        {
+          "id": "good_timestamp_missing",
+          "text": "good样例没有updated_at或collected_at，因此格式分缺少时间戳4分。",
+          "expected_result": "fail",
+          "reason": "将bad或其他对象的缺失判断移植到good，与实际原文矛盾。"
+        }
+      ]
+    },
+    {
+      "id": "field_mapping",
+      "description": "已有tags不等于已证明所有分析信息透传；已有字段不能说不存在。",
+      "evidence_ids": [
+        "organizer_article_fields"
+      ],
+      "assumption_ids": [],
+      "claims": [
+        {
+          "id": "organizer_tags_exist",
+          "text": "organizer的标准JSON合同明确包含tags字段；分析亮点等是否完整透传还需分别核对，不能说标签没有承载字段。",
+          "expected_result": "pass",
+          "reason": "冻结合同77行直接列出tags；该位置不能证明未列明的分析信息已完整映射。"
+        },
+        {
+          "id": "organizer_tags_missing",
+          "text": "organizer的标准JSON只有id,title,source_url,summary,tags,status，因此没有承载标签的字段。",
+          "expected_result": "fail",
+          "reason": "自引合同已经包含tags，否定断言与引用相矛盾。"
+        }
+      ]
+    }
+  ]
+}

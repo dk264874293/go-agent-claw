@@ -18,7 +18,7 @@ func NewListDirTool(workDir string) *ListDirTool { return &ListDirTool{workDir: 
 func (t *ListDirTool) Name() string              { return "list_dir" }
 
 func (t *ListDirTool) Definition() schema.ToolDefinition {
-	return definition(t.Name(), "列出工作区目录的直接子项；仅对目录调用，带 / 后缀的是目录，文件不能继续列目录。", map[string]any{
+	return definition(t.Name(), "非递归查看目录的直接子项，仅在目录结构本身需要核对时使用。按文件类型跨目录发现请直接在目标根调用 find_files，无需逐层列目录。仅对目录调用，带 / 后缀的是目录。", map[string]any{
 		"path": stringParam("工作区相对路径，默认 ."),
 	})
 }

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "kind": "symptom_fixture",
+  "source_task": "6fab055a7f97c1af02c9e5c635b7c6be",
+  "files": [
+    {
+      "path": "01资料包/md版本/第 1 节 实操任务1：安装 OpenCode 并配置国产模型.md",
+      "bytes": 5473,
+      "sha256": "7295edba4c49a59cb7e344414183337ae61c5a2f23412a0f10e9bd93f432c903"
+    },
+    {
+      "path": "01资料包/md版本/第 1 节 实操任务2：裸 API 调用 vs OpenCode 编排对比实验.md",
+      "bytes": 4285,
+      "sha256": "d4c8454b249f8409ef64a0d28a8a809871f3187f3482ae2b2624707f40f84781"
+    },
+    {
+      "path": "01资料包/md版本/第 1 节（SDD强化训练）：SDD 本质 + 手写第一份 spec.md",
+      "bytes": 3767,
+      "sha256": "71ef406674ddfe306ca789f9396797a81c283ab72aa859ee7bb6f44919aab193"
+    },
+    {
+      "path": "02资料包/md版/第 2 节 实操任务1：为知识库项目编写 AGENTS.md.md",
+      "bytes": 6346,
+      "sha256": "fe3f84f0de65e1db2ae501a6fc4d65d056c5e561dd024e0c91431d5037d50d7d"
+    },
+    {
+      "path": "02资料包/md版/第 2 节 实操任务2：有 Memory vs 无 Memory 对比实验.md",
+      "bytes": 2633,
+      "sha256": "b946b54d0ff0e9ce503dd5a00f739b9181c737adc6c77b16a15c0e42357dacda"
+    },
+    {
+      "path": "02资料包/md版/第 2 节（SDD 强化训练）：Memory 工程，AGENTS.md 的 SDD 化重写-修订版.md",
+      "bytes": 3786,
+      "sha256": "a144e58973b8d3b7c25ed34710819a6a9a26e55f2d0dfdd6b68518cb0f96fa57"
+    },
+    {
+      "path": "03资料包/md版/第 3 节 实操任务 1：编写 3 个 Agent 角色定义文件.md",
+      "bytes": 4231,
+      "sha256": "22bdde6ee033f9fb6ea99a3a61b0d4e4ce846a68a103617fb03526b9bbd5b457"
+    },
+    {
+      "path": "03资料包/md版/第 3 节 实操任务 2：用 AI 编程工具触发 Sub-Agent.md",
+      "bytes": 3786,
+      "sha256": "69a26c01628f1f7e6c561959f0b5fbbf1c95348d20cc9871880f8d96d417620b"
+    },
+    {
+      "path": "03资料包/md版/第 3 节（SDD 强化训练）：Sub-Agents 角色分工-三 Agent 协作规格/第 3 节（SDD 强化训练）：Sub-Agents 角色分工-三 Agent 协作规格.md",
+      "bytes": 7669,
+      "sha256": "fd3c0206d6e5a7ef92a03950b3b901951f031a2b83e13a7dbd03c71f5193a37d"
+    },
+    {
+      "path": "04资料包/md版/第 4 节 实操任务 1：封装 Skill 文件.md",
+      "bytes": 4710,
+      "sha256": "3c73627aa356c31815e905447e5ac5d914e6f275b9d687e14219b581f9e5889b"
+    },
+    {
+      "path": "04资料包/md版/第 4 节 实操任务2：跑通 V1 完整流程.md",
+      "bytes": 4216,
+      "sha256": "35e5dac5b0f65291fdfa8514e8034498238bd84871aac4bd2f88c6ad6db6fe2f"
+    },
+    {
+      "path": "04资料包/md版/第 4 节（SDD 强化训练）：从零聊出一份 github-trending SKILL.md-/第 4 节（SDD 强化训练）：从零聊出一份 github-trending SKILL.md-.md",
+      "bytes": 4322,
+      "sha256": "6fccdde7380717dce74caaa284ded7b132e9470882bd15ca6cb2a2287e2bbcdc"
+    },
+    {
+      "path": "05资料包/md版/第 5 节 实操 1：编写 JSON 格式校验脚本.md",
+      "bytes": 9969,
+      "sha256": "cc1a7e3ba33457c8647101619376d547acc582f912cb3f034905f9f04684ad52"
+    },
+    {
+      "path": "05资料包/md版/第 5 节 实操 2：编写质量评分脚本.md",
+      "bytes": 14038,
+      "sha256": "84d48072f8318f3cf13b1aef1f75ad8a7ffb3d94dcaeb8da6cdf8c67cec9a617"
+    },
+    {
+      "path": "05资料包/md版/第 5 节 实操任务3：配置 Hook 观察反馈循环（选修）.md",
+      "bytes": 7874,
+      "sha256": "33b776796dab38fa64e8d7af0c0046079d8630ae2edecf562474125c317bf993"
+    }
+  ],
+  "limitations": "仅15份Markdown和已核对反例；不含完整初始模型请求、图片、环境文件、二进制或历史任务记录，不是完整历史轨迹回放。"
+}

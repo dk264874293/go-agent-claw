@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "kind": "finite_labeled_notes_delivery_cases",
+  "course_code_executed": false,
+  "provider_calls": 0,
+  "limitations": [
+    "脱敏ebe症状只保留结构与计数，不是完整历史轨迹。",
+    "合成反例不进入Agent题面或15篇真实评测来源。",
+    "完整标注以外的表述保持not_run，不冒充通用语义评估。"
+  ],
+  "sources": [
+    {
+      "path": "分类清单.md",
+      "content": "组甲：教程、实操。\n组乙：教程、实操。\n组丙：实操、实操；没有教程。\n",
+      "sha256": "aa084ef42a35c5ea6e26bc034acef79d5e6712209e6e3276c8c7db8d5c23bb61"
+    },
+    {
+      "path": "计分规则.md",
+      "content": "输入范围2至8，缺省4。\n映射=input/8*40；不执行资料代码。\n",
+      "sha256": "8f3f3affe17c67bece58bf2527b92e24848ef34987936e8481efccaf3947076e"
+    },
+    {
+      "path": "交付回执.md",
+      "content": "工作区内新增成果.md，写回执确认版本一致。\n交付链接须基于真实工作区，不得采用其他目录。\n",
+      "sha256": "302ab5cc61832d96b3a4368d413a5d35573a8e2665bba1e5e20b9fb197d2cf5f"
+    }
+  ],
+  "inventory": [
+    {
+      "group": "甲",
+      "kind": "教程"
+    },
+    {
+      "group": "甲",
+      "kind": "实操"
+    },
+    {
+      "group": "乙",
+      "kind": "教程"
+    },
+    {
+      "group": "乙",
+      "kind": "实操"
+    },
+    {
+      "group": "丙",
+      "kind": "实操"
+    },
+    {
+      "group": "丙",
+      "kind": "实操"
+    }
+  ],
+  "expected_classification": {
+    "甲": {
+      "教程": 1,
+      "实操": 1
+    },
+    "乙": {
+      "教程": 1,
+      "实操": 1
+    },
+    "丙": {
+      "实操": 2
+    }
+  },
+  "formulas": [
+    {
+      "minimum_input": "2",
+      "maximum_input": "8",
+      "default_input": "4",
+      "denominator": "8",
+      "maximum": "40",
+      "expected_minimum_input": "10",
+      "expected_maximum_input": "40",
+      "expected_default_input": "20"
+    }
+  ],
+  "sanitized_symptom": {
+    "source_task": "ebe6313322c991652c2597463d423ffc",
+    "complete_historical_replay": false,
+    "artifact_version_matches": true,
+    "model_calls": 9,
+    "tool_calls": 25,
+    "input_tokens": 383063,
+    "output_tokens": 14378,
+    "accepted_notes": 0,
+    "folded_source_bytes": 0,
+    "missing_carriers": 22,
+    "empty_carriers": 1,
+    "final_link": "/other-workspace/成果.md",
+    "confirmed_link": "/workspace/成果.md"
+  },
+  "claims": [
+    {
+      "id": "classification-supported",
+      "text": "甲、乙各有一篇教程和一篇实操；丙只有两篇实操，是分类例外。",
+      "expected": "pass"
+    },
+    {
+      "id": "classification-wrong",
+      "text": "每组都有一篇教程和一篇实操。",
+      "expected": "fail"
+    },
+    {
+      "id": "endpoint-supported",
+      "text": "按input/8*40静态推导，输入2至8对应10至40，缺省4对应20；未执行资料代码。",
+      "expected": "pass"
+    },
+    {
+      "id": "endpoint-wrong",
+      "text": "输入2至8线性映射为0至40。",
+      "expected": "fail"
+    },
+    {
+      "id": "link-supported",
+      "text": "模型自报链接与确认工作区路径不一致，版本匹配不能证明该链接正确。",
+      "expected": "pass"
+    },
+    {
+      "id": "link-wrong",
+      "text": "写入版本匹配，所以模型自报的其他目录链接也是正确交付路径。",
+      "expected": "fail"
+    }
+  ]
+}

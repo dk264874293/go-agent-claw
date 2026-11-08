@@ -122,10 +122,10 @@ func TestAnalysisIntegrationFinalDeliveryAndNoRepairCalls(t *testing.T) {
 				t.Fatalf("无效报告误报完成或丢失部分交付：%+v", result)
 			}
 			state := loadAnalysisIntegrationState(t, dir, result.TaskID)
-			if state.Analysis == nil || len(state.Analysis.Evidence) != 1 || state.LastResult == nil || state.LastResult.Status != result.Status {
+			if analysisStateOf(state) == nil || len(analysisStateOf(state).Evidence) != 1 || state.LastResult == nil || state.LastResult.Status != result.Status {
 				t.Fatal("终态或证据没有正确落盘")
 			}
-			for _, entry := range state.Analysis.Evidence {
+			for _, entry := range analysisStateOf(state).Evidence {
 				if len(entry.Source) != 0 || entry.ArtifactID == "" {
 					t.Fatal("原文重复编码在状态或缺少材料引用")
 				}

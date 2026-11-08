@@ -26,7 +26,7 @@ func NewFindFilesTool(workDir string) *FindFilesTool { return &FindFilesTool{wor
 func (t *FindFilesTool) Name() string                { return "find_files" }
 
 func (t *FindFilesTool) Definition() schema.ToolDefinition {
-	return definition(t.Name(), "按文件基本名递归发现工作区普通文件，仅返回相对路径；发现不代表读取或完成分析。截断时应缩小路径。", map[string]any{
+	return definition(t.Name(), "从目标目录递归发现普通文件，无需先知道子目录或逐层 list_dir。跨目录汇总 Markdown 可直接使用 path=\".\",name_glob=\"*.md\"。仅返回相对路径及发现回执，发现不代表读取或完成分析；截断时缩小路径。", map[string]any{
 		"path":      stringParam("目录相对路径，默认 ."),
 		"name_glob": nameGlobParam("基本名通配模式，默认 *；例如 *.md，大小写敏感，不支持目录分隔符或 **"),
 		"limit":     intParam("最多返回的文件数，默认 200，上限 200；遍历最多检查 2000 个目录项", 1, maxFindMatches),

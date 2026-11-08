@@ -15,6 +15,7 @@ import (
 	ctxpkg "github.com/dk264874293/go-agent-claw/internal/context"
 	"github.com/dk264874293/go-agent-claw/internal/engine"
 	"github.com/dk264874293/go-agent-claw/internal/observe"
+	"github.com/dk264874293/go-agent-claw/internal/requestdiag"
 	"github.com/dk264874293/go-agent-claw/internal/tools"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -88,6 +89,15 @@ func newFeishuBot(parent context.Context, config Config, run RunTaskFunc, send s
 	for id, binding := range config.Chats {
 		binding.AllowedUsers = slices.Clone(binding.AllowedUsers)
 		binding.Approvers = slices.Clone(binding.Approvers)
+		if binding.ReadFeatures != nil {
+			copy := *binding.ReadFeatures
+			binding.ReadFeatures = &copy
+		}
+		if binding.ReadScope != nil {
+			copy := *binding.ReadScope
+			copy.Paths = slices.Clone(copy.Paths)
+			binding.ReadScope = &copy
+		}
 		chats[id] = binding
 	}
 	config.Chats = chats
@@ -257,6 +267,11 @@ func (b *FeishuBot) runQueue(queue *chatQueue, binding ChatBinding) {
 }
 
 func (b *FeishuBot) execute(ctx context.Context, session *ctxpkg.Session, binding ChatBinding, msg incomingMessage) {
+	diagnostics, configErr := requestdiag.ResolveConfig(binding.RequestDiagnostics, binding.RequestDiagnosticsDir)
+	if configErr != nil {
+		b.reply(b.ctx, msg.chatID, "请求诊断配置无效，任务未启动："+configErr.Error())
+		return
+	}
 	gate := b.gates[binding.WorkDir]
 	select {
 	case <-ctx.Done():
@@ -270,13 +285,14 @@ func (b *FeishuBot) execute(ctx context.Context, session *ctxpkg.Session, bindin
 		return
 	}
 
-	spec := engine.TaskSpec{Goal: msg.text, Mode: binding.Mode, VerifyCommand: binding.VerifyCommand, Kind: engine.TaskChange, Analysis: binding.Analysis, Delegation: binding.Delegation}
+	spec := engine.TaskSpec{Goal: msg.text, Mode: binding.Mode, VerifyCommand: binding.VerifyCommand, Kind: engine.TaskChange, Analysis: binding.Analysis, Delegation: binding.Delegation, ReadPageBytes: binding.ReadPageBytes, ReadFeatures: binding.ReadFeatures, ReadScope: binding.ReadScope, OutputStyle: binding.OutputStyle}
 	if binding.Mode == tools.ModeReadOnly {
 		spec.Kind = engine.TaskAnswer
 	}
 	reporter := &FeishuReporter{bot: b, chatID: msg.chatID}
 	ctx, attempt := observe.StartFromEnv(ctx, observe.Options{WorkDir: binding.WorkDir, Entry: "feishu", Goal: spec.Goal, Kind: string(spec.Kind), Mode: string(spec.Mode)})
-	defer attempt.Close()
+	ctx, diagnosticAttempt := engine.StartRequestDiagnostics(ctx, diagnostics)
+	defer engine.CloseRequestDiagnostics(diagnosticAttempt, attempt)
 	result, err := b.run(ctx, session, spec, reporter, b.approval.guard(msg.chatID, msg.senderID, binding, b.send))
 	ctx = observe.WithTask(ctx, result.TaskID)
 	attempt.Returned(engine.ObservationResult(result, err))

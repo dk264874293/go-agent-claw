@@ -110,7 +110,7 @@ func (r *runState) recordedPartial(reason, extra string) *PartialReport {
 	if extra != "" {
 		text.WriteString("\n收尾情况：" + extra)
 	}
-	if r.analysisEnabled() {
+	if r.evidenceEnabled() {
 		text.WriteString(r.recordedAnalysisSummary())
 	}
 	if coverage := r.recordedReadSummary(); coverage != "" {
@@ -133,6 +133,9 @@ func (r *runState) recordedPartial(reason, extra string) *PartialReport {
 
 // partialForStop 只在工具额度耗尽时尝试一次模型汇总，其他出口仅解释已记录的事实。
 func (e *AgentEngine) partialForStop(ctx context.Context, r *runState, session *ctxpkg.Session, system schema.Message, result RunResult) (*PartialReport, error) {
+	if r.qualityEnabled() {
+		return r.recordedPartial(result.Reason, "质量任务未完成；不追加预算收尾或格式修复请求。"), nil
+	}
 	if result.Status == Blocked && result.StopCode == "readonly_repeat" {
 		return e.partialForReadonlyStop(ctx, r, session, system, result)
 	}
@@ -180,11 +183,16 @@ func (e *AgentEngine) requestPartial(ctx context.Context, r *runState, session *
 	goal := r.state.Spec.Goal
 	r.mu.Unlock()
 	system.Content += "\n任务目标：" + goal
-	if !r.analysisEnabled() {
+	r.mu.Lock()
+	needsHistorical := r.state.LastResult != nil && r.state.LastResult.RunID != r.runID && len(r.analysisRuntime.sources) == 0
+	r.mu.Unlock()
+	if !r.evidenceEnabled() || needsHistorical {
 		system.Content += r.persistedPartialContext()
 	}
 	messages := append([]schema.Message{system}, session.GetWorkingMemory(20)...)
-	if r.analysisEnabled() {
+	if r.readMemoryEnabled() {
+		messages = append([]schema.Message{system}, r.taskHistory(session)...)
+	} else if r.analysisEnabled() {
 		messages = append([]schema.Message{system}, analysisHistory(session)...)
 	}
 	msg, err := e.generateRequest(context.WithValue(ctx, modelStageKey{}, "closing"), r, messages, nil, true)

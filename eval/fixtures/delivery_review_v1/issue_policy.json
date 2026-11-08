@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "issue_types": [
+    "numeric",
+    "default",
+    "version_scope",
+    "object_identity",
+    "source_attribution",
+    "validation_semantics",
+    "command_existence",
+    "runtime_boundary",
+    "repair",
+    "omission"
+  ],
+  "special_mappings": {
+    "proposed_repairs": [
+      "repair"
+    ],
+    "subject_identity": [
+      "object_identity",
+      "source_attribution"
+    ],
+    "important_omissions": [
+      "omission"
+    ]
+  },
+  "gate": "score>=8; no major incorrect/omitted/unverified; ordinary issues reduce scores but are not extra hard gates",
+  "stability": "program compares semantic projection, ignores reason wording and array order; no manually supplied consistent",
+  "definitions": {
+    "numeric": "公式、算术、数值转述及加总是否正确。",
+    "default": "字段缺失、默认值及可选分支条件；null/false/0/空串不等于缺失。",
+    "version_scope": "版本、生效阶段、适用范围和比较两端是否匹配。",
+    "object_identity": "主张是否属于所选对象，不能将另一对象字段或结果移植。",
+    "source_attribution": "主张归属的来源是否正确。把第三或第四份材料的版本声明归给第二份材料，必须含本类；可同时标version_scope。",
+    "validation_semantics": "区分存在、非空、类型和合法性检查，不扩大已实现的证明范围。",
+    "command_existence": "已有使用、测试或验收命令的存在及用途。",
+    "runtime_boundary": "区分原文经验、静态推导和本次真实执行，不凭阅读宣布运行通过。",
+    "repair": "修正建议本身的正确性、依赖与适用条件。",
+    "omission": "未被产物充分处理的冻结量表项；绑定rubric，不能伪造输出区间。"
+  }
+}

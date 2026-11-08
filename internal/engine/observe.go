@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"github.com/dk264874293/go-agent-claw/internal/observe"
+	"github.com/dk264874293/go-agent-claw/internal/provider"
 )
 
 // ObservationResult 只交付结构化运行元数据，不复制答复、工具输出或错误原文。
@@ -49,6 +50,9 @@ func observationError(err error) string {
 	case errors.Is(err, errBudget):
 		return "budget_exhausted"
 	default:
+		if kind := provider.FailureKind(err); kind != "" {
+			return kind
+		}
 		return "execution_error"
 	}
 }

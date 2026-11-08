@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/dk264874293/go-agent-claw/internal/requestdiag"
 	"github.com/dk264874293/go-agent-claw/internal/schema"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
@@ -13,8 +14,11 @@ import (
 )
 
 func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Message, defs []schema.ToolDefinition) (*schema.Message, error) {
+	ctx = withProviderResponse(ctx)
 	input := make(responses.ResponseInputParam, 0, len(msgs))
-	for _, msg := range msgs {
+	mappings := map[int][]string{}
+	for inputIndex, msg := range msgs {
+		before := len(input)
 		switch msg.Role {
 		case schema.RoleSystem:
 			input = append(input, responses.ResponseInputItemParamOfMessage(msg.Content, responses.EasyInputMessageRoleSystem))
@@ -30,6 +34,9 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 				for _, item := range msg.ResponseItems {
 					input = append(input, param.Override[responses.ResponseInputItemUnionParam](item))
 				}
+				for i := before; i < len(input); i++ {
+					mappings[inputIndex] = append(mappings[inputIndex], fmt.Sprintf("input[%d]", i))
+				}
 				continue
 			}
 			if msg.Content != "" {
@@ -39,7 +46,11 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Arguments), call.ID, call.Name))
 			}
 		}
+		for i := before; i < len(input); i++ {
+			mappings[inputIndex] = append(mappings[inputIndex], fmt.Sprintf("input[%d]", i))
+		}
 	}
+	ctx = requestdiag.WithWireMappings(ctx, mappings)
 
 	tools := make([]responses.ToolUnionParam, 0, len(defs))
 	for _, def := range defs {
@@ -76,7 +87,7 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI Responses API 请求失败: %w", err)
+		return nil, NormalizeRequestError(ctx, actualProvider(p.provider), "responses", err)
 	}
 
 	msg := &schema.Message{Role: schema.RoleAssistant, Content: resp.OutputText()}
@@ -87,7 +98,7 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 		}
 	}
 	if resp.Status != "" && resp.Status != responses.ResponseStatusCompleted {
-		return msg, fmt.Errorf("OpenAI Responses 未完成，状态为 %s", resp.Status)
+		return msg, responseInvalid(ctx, actualProvider(p.provider), "responses", fmt.Sprintf("Responses 未完成，状态为 %s", resp.Status))
 	}
 	for _, item := range resp.Output {
 		switch item.Type {
@@ -104,5 +115,5 @@ func (p *OpenAIProvider) generateResponses(ctx context.Context, msgs []schema.Me
 		}
 		msg.ResponseItems = append(msg.ResponseItems, json.RawMessage(item.RawJSON()))
 	}
-	return msg, nil
+	return validatedProviderMessage(ctx, actualProvider(p.provider), "responses", msg)
 }

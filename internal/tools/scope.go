@@ -21,6 +21,30 @@ type ExecutionScope struct {
 	WorkDir         string
 	AllowedPaths    []string
 	DisableSubagent bool
+	ReadPageBytes   int
+	ReportOnly      bool
+}
+
+const (
+	DefaultReadPageBytes = 8000
+	MaxReadPageBytes     = 16000
+)
+
+// ValidateReadPageBytes 的零值表示兼容现有默认读取档位。
+func ValidateReadPageBytes(n int) error {
+	if n != 0 && n != DefaultReadPageBytes && n != MaxReadPageBytes {
+		return fmt.Errorf("读取档位必须为 8000 或 16000 字节")
+	}
+	return nil
+}
+
+// ReadPageBytes 是 Schema、读取和重复区间计算共用的有效档位。
+func ReadPageBytes(ctx context.Context) int {
+	n := ScopeFromContext(ctx).ReadPageBytes
+	if n == 0 {
+		return DefaultReadPageBytes
+	}
+	return n
 }
 
 type scopeKey struct{}
@@ -40,7 +64,7 @@ func ScopeFromContext(ctx context.Context) ExecutionScope {
 
 func IsReadOnly(name string) bool {
 	switch name {
-	case "read_file", "read_lines", "list_dir", "search_text", "read_evidence", "read_report", "find_files":
+	case "read_file", "read_lines", "list_dir", "search_text", "read_evidence", "read_report", "find_files", "verify_findings", "check_evidence":
 		return true
 	}
 	return false
@@ -50,6 +74,12 @@ func (s ExecutionScope) allowsTool(name string) bool {
 	switch s.Mode {
 	case ModeReadOnly, ModeWorkspace, ModeTrusted:
 	default:
+		return false
+	}
+	if s.ReportOnly {
+		return IsReadOnly(name) || name == "write_report" && s.Mode == ModeWorkspace
+	}
+	if name == "write_report" {
 		return false
 	}
 	switch {

@@ -122,9 +122,11 @@ func (x *Index) scanObservations(tasks map[string]Task, attempts map[string]Atte
 			}
 			if artifact := textField(p, "artifact_id"); validID(artifact) && tid != "" {
 				w := x.workspaces[wid]
-				ref := x.addEvidence(w.Path, ".claw/tasks/"+tid+"/artifacts/"+artifact, "工具证据 "+artifact)
-				if !containsEvidence(t.Evidence, ref.ID) {
-					t.Evidence = append(t.Evidence, ref)
+				if x.taskArtifactsVisible(w.Path, tid) && x.localCheckArtifactVisible(w.Path, tid, artifact) {
+					ref := x.addEvidence(w.Path, ".claw/tasks/"+tid+"/artifacts/"+artifact, "工具证据 "+artifact)
+					if !containsEvidence(t.Evidence, ref.ID) {
+						t.Evidence = append(t.Evidence, ref)
+					}
 				}
 			}
 		}
@@ -215,15 +217,23 @@ func (x *Index) scanObservations(tasks map[string]Task, attempts map[string]Atte
 			if returned && t.EngineStatus != "" && (t.EngineStatus != a.Status || t.StopCode != a.StopCode ||
 				(a.ResultRunID != "" && t.ResultRunID != "" && a.ResultRunID != t.ResultRunID)) {
 				t.FinalText = ""
+				t.FinalTextDisplay = ""
 				t.PartialReport = nil
 				t.Analysis = nil
 				t.Reading = nil
+				t.Report = nil
+				t.Quality = nil
+				t.DeliveryReview = nil
+				t.LocalChecks = nil
+				t.Artifacts = nil
+				t.ReadMemory = nil
 				t.Alerts = append(t.Alerts, Alert{Code: "result_mismatch", Message: "入口返回观察与历史持久结果不同，请分别核对。", AttemptID: a.ID})
 			}
 			// 新入口先于 taskstore.started 被观察到时，也不能展示上次运行的分析。
 			// 当前 finished 的提交边界可证明部分报告已经属于本次调用。
-			if !returned && (t.PartialReport != nil || t.Analysis != nil || t.Reading != nil) {
+			if !returned && (t.PartialReport != nil || t.Analysis != nil || t.Reading != nil || t.Report != nil || t.Quality != nil || t.DeliveryReview != nil || len(t.LocalChecks) > 0 || len(t.Artifacts) > 0 || t.ReadMemory != nil) {
 				currentFinish := false
+				currentState := false
 				if source := x.sources[id]; source != nil && source.view.Result != nil {
 					for _, ev := range s.events {
 						if ev.EventType == "task_event_committed" && textField(ev.Payload, "source_kind") == "finished" && ev.SourceTaskSequence == source.view.Sequence {
@@ -232,13 +242,32 @@ func (x *Index) scanObservations(tasks map[string]Task, attempts map[string]Atte
 						}
 					}
 				}
+				if source := x.sources[id]; source != nil {
+					for _, ev := range s.events {
+						if ev.EventType == "task_event_committed" && ev.SourceTaskSequence > 0 && ev.SourceTaskSequence <= source.view.Sequence {
+							currentState = true
+							break
+						}
+					}
+				}
 				if !currentFinish {
 					if t.Analysis != nil || t.Reading != nil {
 						t.FinalText = ""
+						t.FinalTextDisplay = ""
 					}
 					t.PartialReport = nil
 					t.Analysis = nil
 					t.Reading = nil
+					if !currentState || t.Report != nil && t.Report.OriginRunID == t.ResultRunID {
+						t.Report = nil
+					}
+					t.Artifacts = nil
+					if !currentState {
+						t.ReadMemory = nil
+						t.Quality = nil
+						t.DeliveryReview = nil
+						t.LocalChecks = nil
+					}
 				}
 			}
 		}
@@ -302,6 +331,16 @@ func (x *Index) detect(t *Task) {
 		requests := map[string]string{}
 		for _, ev := range a.Events {
 			p := ev.Payload
+			if request, ok := p["request"].(map[string]any); ok {
+				status := textField(request, "capture_status")
+				if status == "dropped" || status == "unavailable" {
+					message := "请求诊断材料未可靠保存；诊断旁路状态与引擎结果分别显示"
+					if reason := textField(request, "capture_reason"); reason != "" {
+						message += "：" + reason
+					}
+					t.Alerts = append(t.Alerts, Alert{Code: "request_diagnostic_unavailable", Message: message, AttemptID: a.ID, Sequence: ev.Sequence})
+				}
+			}
 			tool := textField(p, "tool")
 			if ev.ActionID != "" && textField(p, "request_digest") != "" {
 				requests[ev.ActionID] = textField(p, "request_digest")
@@ -346,27 +385,7 @@ func (x *Index) Workspaces() []Workspace {
 	return items
 }
 func (x *Index) Tasks(workspace, status, q string) []Task {
-	x.mu.RLock()
-	defer x.mu.RUnlock()
-	items := []Task{}
-	q = strings.ToLower(q)
-	for _, t := range x.tasks {
-		if workspace != "" && workspace != t.WorkspaceID || status != "" && status != t.EngineStatus || q != "" && !strings.Contains(strings.ToLower(t.Goal+" "+t.TaskID), q) {
-			continue
-		}
-		items = append(items, t)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		a, b := items[i], items[j]
-		if a.LastObservedAt != nil && b.LastObservedAt != nil && !a.LastObservedAt.Equal(*b.LastObservedAt) {
-			return a.LastObservedAt.After(*b.LastObservedAt)
-		}
-		if a.LastObservedAt != nil && b.LastObservedAt == nil {
-			return true
-		}
-		return a.ID < b.ID
-	})
-	return items
+	return x.QueryTasks(TaskQuery{Workspace: workspace, Status: status, Q: q})
 }
 func (x *Index) Task(id string) (Task, bool) {
 	x.mu.RLock()

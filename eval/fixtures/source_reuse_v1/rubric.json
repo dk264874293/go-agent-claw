@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "rubrics": [
+    {
+      "id": "version_status",
+      "description": "V1/V2状态迁移与边界",
+      "evidence_ids": [
+        "v2_boundary",
+        "status_enum",
+        "v1_nested_score_and_status"
+      ]
+    },
+    {
+      "id": "score_default",
+      "description": "缺少顶层score默认5映射12.5，不必然崩溃",
+      "evidence_ids": [
+        "score_default"
+      ]
+    },
+    {
+      "id": "numeric_discrepancy",
+      "description": "指出原文84.5/39.5与当前代码静态97.5/29.5不一致",
+      "evidence_ids": [
+        "quality_reported_numbers",
+        "quality_sample_good",
+        "quality_sample_bad",
+        "summary_formula",
+        "score_default",
+        "format_presence",
+        "tag_hollow_formula",
+        "quality_scoring_rules"
+      ]
+    },
+    {
+      "id": "format_presence",
+      "description": "格式维度仅检查非空，不检验ID/URL/enum合法性",
+      "evidence_ids": [
+        "format_presence"
+      ]
+    },
+    {
+      "id": "existing_commands",
+      "description": "已有单条批量good/bad测试命令",
+      "evidence_ids": [
+        "usage_commands",
+        "test_commands"
+      ]
+    },
+    {
+      "id": "hook_boundary",
+      "description": "手工反馈已有，宿主Hook行为需实测",
+      "evidence_ids": [
+        "hook_reference_implementation",
+        "hook_manual_feedback",
+        "hook_host_boundary"
+      ]
+    },
+    {
+      "id": "timestamp_subject",
+      "description": "good含collected_at，不能将bad缺失时间戳或其他对象的结论移植到good；null/false/0/空串不是缺失。",
+      "evidence_ids": [
+        "quality_sample_good",
+        "quality_sample_bad",
+        "format_presence"
+      ]
+    }
+  ]
+}
