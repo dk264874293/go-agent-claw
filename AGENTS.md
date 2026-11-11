@@ -20,11 +20,13 @@ go-agent-claw 是一个 Go 编写的 ReAct 风格 AI 智能体引擎（Think →
 go build -o claw ./cmd/claw        # 构建 CLI
 go run ./cmd/claw                  # 直接运行（不带 -prompt 进入交互对话模式 REPL，带 -prompt 单次执行后退出）
 go build ./cmd/... ./internal/...  # 构建模块内所有包
+go run ./cmd/learn -scenario react # 无密钥教学回放，使用正式引擎与临时工作区
 go run ./cmd/bench                 # 基准测试 runner（会真实调用 LLM API，产生费用）
 ```
 
 - **不要使用 `go build ./...`**：会因 `workspace/main.go` 是空草稿文件而失败。`workspace/` 是智能体的演示/测试工作目录（未纳入 git），不属于模块。
 - 测试：`go test ./cmd/... ./internal/...`。共享预算、账本、存储和审批改动用 `go test -race ./internal/...` 验证。
+- 干净检出：`python3 -B scripts/check_clean_checkout.py`（Python 3.12+），仅导出 HEAD；未提交候选须显式 `--overlay`。`internal/engine/testdata` 中两套合成夹具是测试输入，应随源码保留。课程入口与机制保证边界见 `docs/learning/README.md`、`docs/mechanism-boundaries.md`。
 - CLI、Bench 和独立飞书服务默认读取 `DEEPSEEK_API_KEY`，使用 `deepseek-v4.1-flash-1017`。自动选择 `gpt-*` 模型时读取 `OPENAI_API_KEY`，`glm-*` 读取 `ZHIPU_API_KEY`，飞书服务配置见 README。
 - REPL 内置斜杠命令：`/help` `/exit` `/cost` `/status` `/clear` `/verify` `/resume`。设置验收和清空对话在本地处理，`/resume` 恢复持久任务。输入独占一行的 `"""` 进入多行输入模式，再一行 `"""` 结束提交。
 
@@ -73,7 +75,7 @@ internal/feishu/            — 群聊队列、去重、审批（cmd/agentops）
 
 ## 新增东西
 
-- **新工具**：在 `internal/tools/` 实现 `BaseTool`（Name/Definition/Execute），在 `cmd/claw/main.go` 通过 `registry.Register(...)` 注册。引擎会自动感知。
+- **新工具**：在 `internal/tools/` 实现 `BaseTool`（Name/Definition/Execute），在 `cmd/claw/main.go` 通过 `registry.Register(...)` 注册。注册表会识别该名称，但可见性、权限、只读/变更分类、效果账本与恢复仍需接线；不得将注册当作全部完成。完整清单见 `docs/extending-tools.md`。
 - **新 Provider**：在 `internal/provider/` 实现 `LLMProvider.Generate(ctx, messages, tools)`，加一个读环境变量的构造函数，在 `cmd/claw/main.go` 接线。
 - **工具拦截**：通过 `registry.Use(...)` 添加 `MiddlewareFunc`——中间件在执行前运行，可以带理由拒绝调用，模型必须读该理由。
 

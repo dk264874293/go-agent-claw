@@ -16,6 +16,28 @@ go test -race ./internal/...
 
 演示目录 `workspace/` 可能有空 Go 草稿，不使用 `go build ./...` 或 `go test ./...`。常规单元测试使用本地回放 / 测试服务；真实模型评测是下面单独的显式入口。
 
+### 干净检出与本机工作区
+
+本机目录可能包含被 Git 忽略的夹具、密钥或未提交依赖；本机测试通过不能证明其他人能复现。引擎所需的两套[合成夹具](../internal/engine/testdata/README.md)已纳入源码范围，macOS 元数据继续排除。
+
+```bash
+# Python 3.12+；默认只导出 HEAD，运行构建、无缓存全量测试和内部 race
+python3 -B scripts/check_clean_checkout.py
+# 单独检查一个阶段
+python3 -B scripts/check_clean_checkout.py --check test
+# 提交前，只将明确的候选文件覆盖到已提交源码上，可重复 --overlay
+python3 -B scripts/check_clean_checkout.py --check build --overlay cmd/learn --overlay internal/learning
+python3 -B -m unittest discover -s scripts -p test_clean_checkout.py
+```
+
+候选模式不会复制无关的未提交文件；新增依赖必须一并明确列入。它支持新增和修改，不支持删除覆盖。需要验证删除时先形成提交，再用 `--revision` 导出该提交；未提交的删除不会被静默视为已验证。隔离目录不包含 `.git` 或本机 `.env`，模型密钥及 CLAW 配置变量从子进程环境移除。检查只访问本地回放 / HTTP 测试服务；Go 依赖下载可能联网。
+
+[GitHub Actions](../.github/workflows/offline.yml)按 `go.mod` 选择 Go，分别运行构建、普通测试与 race，并补充 macOS 测试。只有远端实际执行后才能称 CI 通过；本地隔离检查不冒充远端结果。
+
+### 无密钥教学回放
+
+`go run ./cmd/learn -list` 列出课程，`go run ./cmd/learn -scenario react` 运行最小循环。所有候选由脚本 Provider 提出，工具与状态使用正式引擎。错误轨迹会失败，预期阻塞也保留真实终态；详细说明见[课程目录](learning/README.md)。
+
 ## 新增工具
 
 1. 在 `internal/tools/` 实现 `BaseTool`：`Name()`、`Definition()`、`Execute(ctx, args)`。参数类型为 `json.RawMessage`，由工具自己解析和验证。
@@ -24,6 +46,8 @@ go test -race ./internal/...
 4. 验证参数、路径、模式和失败结果；文件写入还要验证版本与未知效果边界。
 
 参考：[Registry 与 BaseTool](../internal/tools/registry.go)、[read_lines](../internal/tools/read_lines.go)、[工具权限](../internal/tools/scope.go)、[Registry 装配](../internal/engine/execution.go)、[CLI 装配](../cmd/claw/main.go)。注册不是授权，不能只修改工具定义就假定它在所有模式可用。
+
+完整接入点及可运行小工具见[工具扩展契约](extending-tools.md)。目前只读、变更和副作用有按工具名分类的规则；新增名称不会自动获得只读权限或持久动作恢复。
 
 ## 新增 Provider
 

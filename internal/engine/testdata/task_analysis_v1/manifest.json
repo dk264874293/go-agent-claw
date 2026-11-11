@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "source_task_id": "7793e113b7f1f42a6a150864ffe14e47",
+  "synthetic": true,
+  "description": "仅保留原任务读取的 15 份 Markdown 的目录拓扑、路径深度和源字节长度，目录文件名及正文均为合成数据。",
+  "file_count": 15,
+  "total_bytes": 87105,
+  "files": [
+    {
+      "path": "section01/section02/doc01.md",
+      "bytes": 5473,
+      "depth": 3,
+      "sha256": "281a209691376ee97bff2eb628529e5bbd4455f460ff8ac89b4a2f1b1c2db37b"
+    },
+    {
+      "path": "section01/section02/doc02.md",
+      "bytes": 4285,
+      "depth": 3,
+      "sha256": "d07e88d114f643e5a0b1a71a348ab5145155fb4834ef7ab4d730787c510e986b"
+    },
+    {
+      "path": "section01/section02/doc03.md",
+      "bytes": 3767,
+      "depth": 3,
+      "sha256": "74855874ff92c551f435ac8edd767dd8fd4fe97b29ef5023d79e9d9bf2d55d45"
+    },
+    {
+      "path": "section03/section04/doc04.md",
+      "bytes": 6346,
+      "depth": 3,
+      "sha256": "0bd8176877303d2830d1a5e483caccdc04ef07ccc81290f7f06e9d693a5cace2"
+    },
+    {
+      "path": "section03/section04/doc05.md",
+      "bytes": 2633,
+      "depth": 3,
+      "sha256": "b71408498214b16ab0f3beff50c9b1efdcf56911b7417e5e8cf57e0bef138da0"
+    },
+    {
+      "path": "section03/section04/doc06.md",
+      "bytes": 3786,
+      "depth": 3,
+      "sha256": "2a5408e45f2e0a50a23c2b776d32b4806ae95bc429107e4263ef279ff9dd6985"
+    },
+    {
+      "path": "section05/section06/doc07.md",
+      "bytes": 4231,
+      "depth": 3,
+      "sha256": "1220303a1a871cac12d38f5c1bdcec54ec89ab06bd5824f81256330cf63c7c87"
+    },
+    {
+      "path": "section05/section06/doc08.md",
+      "bytes": 3786,
+      "depth": 3,
+      "sha256": "1e1f991d5265c242e0ffc606c43bc02a8a22e8d86405d0ea916dd7e129b9eb00"
+    },
+    {
+      "path": "section05/section06/section07/doc09.md",
+      "bytes": 7669,
+      "depth": 4,
+      "sha256": "24d3a04e4ba8ea84ab1d7c6e0f7194d079e52dee900a1a1eaabb8240bbc159da"
+    },
+    {
+      "path": "section08/section09/doc10.md",
+      "bytes": 4710,
+      "depth": 3,
+      "sha256": "66afe2313b7a7eeae24c38f9dd1f6c133def23b7528fcad148c97b5be32324c5"
+    },
+    {
+      "path": "section08/section09/doc11.md",
+      "bytes": 4216,
+      "depth": 3,
+      "sha256": "922986fffd8ac1a3109f0eb547b75512fe1b34c48f08a15d29eb57f4dae45564"
+    },
+    {
+      "path": "section08/section09/section10/doc12.md",
+      "bytes": 4322,
+      "depth": 4,
+      "sha256": "7eb0ac1648f2de62c190fde5bd1524ec7cf101ff6f7861027dd4c0613713e3c7"
+    },
+    {
+      "path": "section11/section12/doc13.md",
+      "bytes": 9969,
+      "depth": 3,
+      "sha256": "0f2c5d16f1f1764c7ab48493cf45e07c729d014fced3642a4427290fc83ad173"
+    },
+    {
+      "path": "section11/section12/doc14.md",
+      "bytes": 14038,
+      "depth": 3,
+      "sha256": "1e4087942581bed5bead712fb36b45b875443e7d9a5e2ab405ded136f8bd793e"
+    },
+    {
+      "path": "section11/section12/doc15.md",
+      "bytes": 7874,
+      "depth": 3,
+      "sha256": "ba2e56d4fed0ba98db937f02e58103c7cef0e1ea3b129ca2853818a963b45ca6"
+    }
+  ],
+  "historical_report_failures": {
+    "findings_object_decode_error": 4,
+    "local_turn_limit": 1
+  },
+  "report_templates": "reports.json"
+}

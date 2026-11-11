@@ -2,7 +2,7 @@
 
 # 上手指南
 
-目标是先完成一次只读问答，再体验写文件，最后观察任务记录。所有命令默认在仓库根目录执行。
+目标是先观察一次无密钥回放，再完成真实只读问答、体验写文件并观察任务记录。所有命令默认在仓库根目录执行。
 
 ## 准备环境
 
@@ -11,6 +11,20 @@
 ```bash
 git clone https://github.com/dk264874293/go-agent-claw.git
 cd go-agent-claw
+```
+
+## 先运行无密钥回放
+
+```bash
+go run ./cmd/learn -scenario react
+go run ./cmd/learn -list
+```
+
+无需 `.env` 或 API Key。脚本 Provider 产生候选，正式引擎完成真实工具读取、观察回传和停止；工作区是自动创建并删除的临时目录。首次下载 Go 依赖可能需要联网。输出与七个课程的说明见[学习入口](learning/README.md)。
+
+## 配置真实模型
+
+```bash
 cp -n env.export .env
 ```
 
@@ -18,7 +32,7 @@ cp -n env.export .env
 
 CLI 已自动加载 `.env`，无需额外执行 `source`。模板可直接被 Shell 解析，如果希望其他命令也使用配置，可以在编辑后执行 `source ./.env`；导出的变量仅影响当前终端及其子进程。
 
-## 第一次运行
+## 第一次真实任务
 
 ```bash
 go run ./cmd/claw -mode readonly -prompt "只阅读 README.md，概括项目用途"
@@ -60,4 +74,4 @@ mkdir -p workspace
 | 任务提示预算耗尽 | 查看已消耗次数和部分交付，再按[恢复说明](tasks-and-recovery.md)决定是否继续 |
 | `.env` 无法加载 | 检查语法、读取权限或符号链接是否断链；已有文件损坏会停止启动 |
 
-不调用模型也能先学习：`go run ./cmd/claw -help` 查看参数，或按[开发指南](development.md)运行离线测试。
+不调用真实模型也能学习：使用 `go run ./cmd/learn -scenario budget` 等课程、`go run ./cmd/claw -help` 查看参数，或按[开发指南](development.md)运行离线测试。

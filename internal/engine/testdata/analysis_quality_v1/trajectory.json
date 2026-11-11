@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "model_calls": 8,
+  "tool_calls": 30,
+  "rounds": [
+    [
+      {
+        "id": "find-1",
+        "name": "find_files",
+        "arguments": {
+          "name_glob": "*.md",
+          "limit": 200
+        }
+      }
+    ],
+    [
+      {
+        "id": "read-0-doc01.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc01.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-0-doc02.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc02.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-0-doc03.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc03.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-0-doc04.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section03/section04/doc04.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-0-doc05.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section03/section04/doc05.md",
+          "limit": 8000
+        }
+      }
+    ],
+    [
+      {
+        "id": "read-1-doc06.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section03/section04/doc06.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-1-doc07.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section05/section06/doc07.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-1-doc08.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section05/section06/doc08.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-1-doc09.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section05/section06/section07/doc09.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-1-doc10.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section08/section09/doc10.md",
+          "limit": 8000
+        }
+      }
+    ],
+    [
+      {
+        "id": "read-2-doc11.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section08/section09/doc11.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-2-doc12.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section08/section09/section10/doc12.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-2-doc13.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section11/section12/doc13.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-2-doc14.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section11/section12/doc14.md",
+          "limit": 8000
+        }
+      },
+      {
+        "id": "read-2-doc15.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section11/section12/doc15.md",
+          "limit": 8000
+        }
+      }
+    ],
+    [
+      {
+        "id": "tail-doc13.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section11/section12/doc13.md",
+          "offset": 8000,
+          "limit": 8000
+        }
+      },
+      {
+        "id": "tail-doc14.md",
+        "name": "read_file",
+        "arguments": {
+          "path": "section11/section12/doc14.md",
+          "offset": 8000,
+          "limit": 8000
+        }
+      },
+      {
+        "id": "search-1",
+        "name": "search_text",
+        "arguments": {
+          "query": "status",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      },
+      {
+        "id": "search-2",
+        "name": "search_text",
+        "arguments": {
+          "query": "score",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      }
+    ],
+    [
+      {
+        "id": "list-1",
+        "name": "list_dir",
+        "arguments": {
+          "path": "."
+        }
+      },
+      {
+        "id": "search-3",
+        "name": "search_text",
+        "arguments": {
+          "query": "V1",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      },
+      {
+        "id": "search-4",
+        "name": "search_text",
+        "arguments": {
+          "query": "V2",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      },
+      {
+        "id": "search-5",
+        "name": "search_text",
+        "arguments": {
+          "query": "默认",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      },
+      {
+        "id": "search-6",
+        "name": "search_text",
+        "arguments": {
+          "query": "测试",
+          "name_glob": "*.md",
+          "limit": 30
+        }
+      }
+    ],
+    [
+      {
+        "id": "reread-0",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc01.md",
+          "offset": 0,
+          "limit": 5000
+        }
+      },
+      {
+        "id": "reread-1",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc02.md",
+          "offset": 0,
+          "limit": 2500
+        }
+      },
+      {
+        "id": "reread-2",
+        "name": "read_file",
+        "arguments": {
+          "path": "section01/section02/doc03.md",
+          "offset": 0,
+          "limit": 2500
+        }
+      },
+      {
+        "id": "reread-3",
+        "name": "read_file",
+        "arguments": {
+          "path": "section03/section04/doc04.md",
+          "offset": 0,
+          "limit": 2500
+        }
+      },
+      {
+        "id": "find-2",
+        "name": "find_files",
+        "arguments": {
+          "name_glob": "*.md",
+          "limit": 200
+        }
+      }
+    ]
+  ]
+}

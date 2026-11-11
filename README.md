@@ -4,18 +4,31 @@
 
 适合想动手理解 Agent 工程的同学交流学习。可以用它阅读代码、整理资料、修改文件，也可以沿着源码观察模型如何调用工具、预算如何扣减、任务为何停止。代码注释、日志和用户提示均使用中文。
 
-[快速开始](#快速开始) · [能力说明](#能力说明) · [学习路线](#学习路线) · [完整文档](docs/README.md) · [配置指南](docs/configuration.md)
+[快速开始](#快速开始) · [无密钥课程](docs/learning/README.md) · [能力说明](#能力说明) · [学习路线](#学习路线) · [完整文档](docs/README.md)
 
 ## 快速开始
 
-需要 **Go 1.25 或更新版本**，推荐 macOS / Linux。实际执行任务会请求模型 API，请准备一个可用密钥；默认渠道为 DeepSeek，项目默认模型名为 `deepseek-v4.1-flash-1017`。
+需要 **Go 1.25 或更新版本**，推荐 macOS / Linux。可以先运行无需密钥的教学回放；真实任务需要模型 API，默认渠道为 DeepSeek，项目默认模型名为 `deepseek-v4.1-flash-1017`。
 
-### 1. 获取项目并准备配置
+### 1. 获取项目
 
 ```bash
 git clone https://github.com/dk264874293/go-agent-claw.git
 cd go-agent-claw
+```
 
+### 2. 先观察一次无密钥循环
+
+```bash
+go run ./cmd/learn -scenario react
+go run ./cmd/learn -list
+```
+
+回放使用脚本 Provider 和真实引擎，实际读取临时文件，显示模型候选、工具准入回执、下一轮观察与任务终态；不读取 `.env`、不调用远端模型。首次下载 Go 依赖可能需要联网。继续按[七个课程](docs/learning/README.md)学习预算、权限、上下文、恢复、计划和工具扩展。
+
+### 3. 配置模型并运行真实任务
+
+```bash
 # 首次使用：复制模板；已有 .env 时跳过，保留本地配置
 cp -n env.export .env
 ```
@@ -24,9 +37,7 @@ cp -n env.export .env
 
 使用其他模型或兼容网关时，参见[模型、端点与代理配置](docs/configuration.md)。CLI 从**启动目录**自动读取 `.env`；`-dir` 指定的是任务工作区。
 
-### 2. 运行第一个任务
-
-在项目根目录执行，只读体验无需准备额外文件：
+在项目根目录执行，只读体验无需准备额外文件，此命令会调用真实模型并产生费用：
 
 ```bash
 go run ./cmd/claw -mode readonly -prompt "阅读 README.md，用中文概括这个项目的用途和主要能力"
@@ -40,7 +51,7 @@ go run ./cmd/claw -mode readonly
 
 输入 `/help` 查看命令，`/exit` 退出，`/cost` 查看用量。默认不传 `-mode` 时为 `workspace`，允许修改工作区文件；初次体验建议明确使用 `readonly`。
 
-### 3. 构建后使用
+### 4. 构建后使用
 
 ```bash
 go build -o claw ./cmd/claw
@@ -82,6 +93,7 @@ mkdir -p workspace
 
 | 能力 | 可以学到什么 | 说明文档 |
 | --- | --- | --- |
+| 无密钥工程课程 | 用真实引擎回放正常流程与故障，核对状态与副作用 | [课程目录](docs/learning/README.md) |
 | ReAct 主循环与多模型 | 模型适配、工具调用、结果回传、引擎分层 | [架构与源码导读](docs/architecture.md) |
 | CLI 与会话 | 单次任务、REPL、多行输入、常用参数 | [CLI 使用](docs/cli.md) |
 | 模型与环境配置 | `env.export`、`.env`、渠道选择、端点、代理、构建默认值 | [配置指南](docs/configuration.md) |
@@ -101,11 +113,11 @@ mkdir -p workspace
 
 ## 学习路线
 
-1. **先跑通**：[上手指南](docs/getting-started.md) → [配置](docs/configuration.md) → [CLI](docs/cli.md)。
-2. **理解最小 Agent**：[架构](docs/architecture.md)，从 `cmd/claw/main.go` 跟到 `internal/engine/loop.go`，再看 Provider 和工具 Registry。
+1. **先看见循环**：[无密钥课程](docs/learning/README.md)，执行 `go run ./cmd/learn -scenario react`，再做预算、权限等故障对照。
+2. **理解真实 Agent**：[架构](docs/architecture.md)，从教学装配跟到 `internal/engine/loop.go`，再看 Provider 和工具 Registry；之后按[上手指南](docs/getting-started.md)、[配置](docs/configuration.md)运行真实只读任务。
 3. **理解工程约束**：[权限](docs/tools-and-permissions.md) → [上下文](docs/context-and-memory.md) → [预算与观测](docs/observability.md)。
 4. **尝试复杂任务**：[计划与委派](docs/planning-and-delegation.md) → [恢复与验收](docs/tasks-and-recovery.md) → [分析与报告](docs/analysis-and-reports.md)。
-5. **动手扩展**：[开发指南](docs/development.md)，增加一个小工具，先离线验证，再决定是否做真实模型评测。
+5. **动手扩展与评价**：[工具扩展契约](docs/extending-tools.md) → [开发指南](docs/development.md) → [机制保证边界](docs/mechanism-boundaries.md) → [实验导航](docs/experiments.md)。
 
 ## 构建与测试
 

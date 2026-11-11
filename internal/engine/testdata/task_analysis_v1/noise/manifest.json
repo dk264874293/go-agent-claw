@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "source_task_id": "6a1f638f9c9eb8ca5e58ddb7be1baa91",
+  "synthetic": true,
+  "description": "仅补充目录误用和二进制搜索噪声的合成样本，不复制原任务附件或二进制。原15份Markdown及其manifest不变。",
+  "marker": "DISCOVERY_SYNTHETIC_BINARY_NOISE",
+  "files": [
+    {
+      "source": "attachment.png",
+      "path": "section01/section02/doc01/assets/image.png",
+      "kind": "png",
+      "bytes": 5863,
+      "sha256": "a98e536d3b2ead65cff8d2a139794877a123eb695c46949b1f64cfdd037c9aad"
+    },
+    {
+      "source": "lecture.pdf",
+      "path": "section03/section04/lecture.pdf",
+      "kind": "pdf",
+      "bytes": 119,
+      "sha256": "13c8d3d022284d9035483b010c442f758daba7ec889c8ac031aa0adaed0a9213"
+    },
+    {
+      "source": "claw",
+      "path": "claw",
+      "kind": "binary",
+      "bytes": 104,
+      "sha256": "71f255483bf673a54d0a9711a64703f69f7876ad39cb3e902a6829f462a74011"
+    }
+  ],
+  "directories": [
+    "directory-with-md-name.md"
+  ]
+}

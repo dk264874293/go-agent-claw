@@ -50,7 +50,9 @@ CLI、Bench 和飞书通过 [ResolveModelConfig / NewConfiguredProvider](../inte
 
 ## 推荐阅读顺序
 
-1. `cmd/claw/main.go`：看依赖如何装配，区分 CLI 参数与 `TaskSpec`。
+首遍建议从[无密钥课程](learning/01-react.md)观察实际输出。只追踪装配、模型请求、工具分发、观察返回和停止；理解主线后，再按具体问题进入报告、质量、读取实验及历史恢复分支。[保证边界](mechanism-boundaries.md)列出这些机制的实现层次。
+
+1. `cmd/learn/main.go`、`internal/learning/basic.go`：用固定候选看真实引擎装配，再到 `cmd/claw/main.go` 区分真实模型配置、CLI 参数与 `TaskSpec`。
 2. `internal/engine/types.go`、`loop.go`：理解 `NewAgentEngine(provider, registry, EngineOptions)` 和 `Run(ctx, session, TaskSpec, reporter)`。
 3. `internal/provider/interface.go`、`openai.go`：看一次模型请求怎样编码和返回。
 4. `internal/tools/registry.go`、`read_file.go`：看工具如何定义、校验参数并执行。

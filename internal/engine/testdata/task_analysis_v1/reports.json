@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "description": "报告内容是合成结构；调用者用实际读取的路径、版本与行号构造 evidence。",
+  "reports": [
+    {
+      "name": "string_findings",
+      "findings": "已读取结构夹具，仍需核实跨文档关系。",
+      "unverified": []
+    },
+    {
+      "name": "historical_object_findings",
+      "findings": {
+        "summary": "结构夹具摘要",
+        "documents": [
+          {
+            "name": "文档一",
+            "observations": [
+              "已读取指定范围"
+            ]
+          }
+        ]
+      },
+      "unverified": []
+    },
+    {
+      "name": "array_findings",
+      "findings": [
+        {
+          "summary": "第一项结构发现"
+        },
+        {
+          "summary": "第二项结构发现"
+        }
+      ],
+      "unverified": []
+    },
+    {
+      "name": "invalid_findings",
+      "findings": null,
+      "unverified": [
+        "报告内容无效"
+      ]
+    }
+  ],
+  "invalid_json": "{\"findings\":{\"summary\":\"不完整的结构报告\"}"
+}

@@ -12,4 +12,8 @@
 
 .go-cache/
 
-internal/engine/testdata
+/internal/engine/testdata/*
+!/internal/engine/testdata/README.md
+!/internal/engine/testdata/task_analysis_v1/
+!/internal/engine/testdata/analysis_quality_v1/
+/internal/engine/testdata/**/.DS_Store

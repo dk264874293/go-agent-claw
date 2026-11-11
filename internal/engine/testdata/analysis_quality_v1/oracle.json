@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "mechanical_check_is_semantic_judgment": false,
+  "cases": [
+    {
+      "id": "version-migration",
+      "sources": [
+        {
+          "path": "section01/section02/doc01.md",
+          "line": 3,
+          "quote": "版本：第一周 V1。"
+        },
+        {
+          "path": "section01/section02/doc02.md",
+          "line": 3,
+          "quote": "本节明确进入第二周 V2。"
+        },
+        {
+          "path": "section03/section04/doc06.md",
+          "line": 3,
+          "quote": "本页 Hook 仍引用第一周 V1 的 status 规范。"
+        }
+      ],
+      "facts": [
+        "两份规范明确属于不同版本",
+        "Hook 仍引用 V1"
+      ],
+      "supported_inference": "需要补齐 V1 到 V2 的迁移及规范同步说明。",
+      "unsupported_claims": [
+        "同一个版本自相矛盾",
+        "已经实测发生校验失败"
+      ]
+    },
+    {
+      "id": "score-default",
+      "sources": [
+        {
+          "path": "section01/section02/doc03.md",
+          "line": 7,
+          "quote": "raw = data.get(\"score\", 5)"
+        },
+        {
+          "path": "section01/section02/doc03.md",
+          "line": 8,
+          "quote": "return raw / 10 * 25"
+        },
+        {
+          "path": "section03/section04/doc05.md",
+          "line": 3,
+          "quote": "score 为可选字段；存在时必须为 0 到 10 的数字。"
+        },
+        {
+          "path": "section03/section04/doc05.md",
+          "line": 4,
+          "quote": "缺少 score 不会单独触发格式校验失败。"
+        }
+      ],
+      "facts": [
+        "读取使用 data.get(\"score\", 5)，不是 data[\"score\"]",
+        "缺少 score 时使用5，权重计算为12.5/25",
+        "缺字段本身不会导致格式校验失败"
+      ],
+      "supported_inference": "未建立 relevance_score 到 score 的映射可能降低默认评分；仍需实际运行核实。",
+      "unsupported_claims": [
+        "缺少 score 必然引发 KeyError",
+        "缺少 score 必然导致格式校验失败"
+      ]
+    },
+    {
+      "id": "existing-test-command",
+      "sources": [
+        {
+          "path": "section03/section04/doc04.md",
+          "line": 5,
+          "quote": "python3 validate_entry.py examples/valid.json"
+        },
+        {
+          "path": "section03/section04/doc04.md",
+          "line": 6,
+          "quote": "python3 quality_score.py examples/valid.json"
+        },
+        {
+          "path": "section03/section04/doc04.md",
+          "line": 8,
+          "quote": "示例没有自动断言退出码，也没有统一的一键回归入口。"
+        }
+      ],
+      "facts": [
+        "已有测试运行命令",
+        "未描述自动断言或统一一键回归入口"
+      ],
+      "supported_inference": "可以补充断言和统一回归入口，不能表述为没有测试命令。",
+      "unsupported_claims": [
+        "文档没有任何测试命令",
+        "本次测试已经运行通过"
+      ]
+    }
+  ]
+}

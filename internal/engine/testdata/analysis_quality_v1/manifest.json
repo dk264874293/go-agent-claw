@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "description": "复用 task_analysis_v1 的15文档拓扑和字节长度，新合成版本迁移、默认值、已有测试命令反例；不含原业务文档。",
+  "structure_source": "../task_analysis_v1/manifest.json",
+  "quality_baseline_task_id": "9ce85df9764cba9a8d4c64d2fd8d4034",
+  "file_count": 15,
+  "total_bytes": 87105,
+  "files": [
+    {
+      "path": "section01/section02/doc01.md",
+      "bytes": 5473,
+      "depth": 3,
+      "sha256": "f31ccbdfabb7f160e8eed31b9fb1396d6d71669b2d352a9237a882662cc3cca4"
+    },
+    {
+      "path": "section01/section02/doc02.md",
+      "bytes": 4285,
+      "depth": 3,
+      "sha256": "c46a42d95d73dce98d7145684c74c8ed7662fe13afaf559d4815d922b0dcb318"
+    },
+    {
+      "path": "section01/section02/doc03.md",
+      "bytes": 3767,
+      "depth": 3,
+      "sha256": "f0b6665be2da09192698f3f0ccec740a579c109432b3cde408af5eaea4048a65"
+    },
+    {
+      "path": "section03/section04/doc04.md",
+      "bytes": 6346,
+      "depth": 3,
+      "sha256": "51c73dc1c35f8b5d8d48c1fe92fd0a34fd7edb06d19704ea86b04978e510259e"
+    },
+    {
+      "path": "section03/section04/doc05.md",
+      "bytes": 2633,
+      "depth": 3,
+      "sha256": "cf4c6c721e32e60b3f70cf1f63a433e3126d70c6990a613acafff6888287a9e4"
+    },
+    {
+      "path": "section03/section04/doc06.md",
+      "bytes": 3786,
+      "depth": 3,
+      "sha256": "7491404acc0ce5e56226a37cc5c5cecceb6d61ce646f17be30f54a32a2d57a49"
+    },
+    {
+      "path": "section05/section06/doc07.md",
+      "bytes": 4231,
+      "depth": 3,
+      "sha256": "059ef972e108733030cd2b135a46a2a0170d8518013d8d6e646150883f66daaa"
+    },
+    {
+      "path": "section05/section06/doc08.md",
+      "bytes": 3786,
+      "depth": 3,
+      "sha256": "f3debe8ca6c66ce9afe97bf62d7c13f6be2a527318f30b896cad03307eaa4f0d"
+    },
+    {
+      "path": "section05/section06/section07/doc09.md",
+      "bytes": 7669,
+      "depth": 4,
+      "sha256": "29b4d95233426ca0a50e5bf7923bbeb4c80bb863289224df90453281613bbeeb"
+    },
+    {
+      "path": "section08/section09/doc10.md",
+      "bytes": 4710,
+      "depth": 3,
+      "sha256": "a493477884fb1c71a6ce150c544a4f05b47f045ef3bc80e278129c28c9d9e893"
+    },
+    {
+      "path": "section08/section09/doc11.md",
+      "bytes": 4216,
+      "depth": 3,
+      "sha256": "79ca7e13eb465ad75c4d1622ecc0e2aa03e7b8bf026cdb53aef89257d52d4783"
+    },
+    {
+      "path": "section08/section09/section10/doc12.md",
+      "bytes": 4322,
+      "depth": 4,
+      "sha256": "3780b56c6744373c904bfcc094153e98536b343f2f578205094d593f25f64a16"
+    },
+    {
+      "path": "section11/section12/doc13.md",
+      "bytes": 9969,
+      "depth": 3,
+      "sha256": "8c35f26d43798b6b152c050371e24957b067829f2db87a8ef7aac7e827d3f879"
+    },
+    {
+      "path": "section11/section12/doc14.md",
+      "bytes": 14038,
+      "depth": 3,
+      "sha256": "b6a48b68f5fc2f008cdfc1d6a8852751dcd6650e78e628eb2528768eb76acf16"
+    },
+    {
+      "path": "section11/section12/doc15.md",
+      "bytes": 7874,
+      "depth": 3,
+      "sha256": "b2155fe853673eba423cfe115c8c656180fbafd5b49ca8d6598faac63b800df0"
+    }
+  ],
+  "oracle": "oracle.json"
+}

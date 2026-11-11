@@ -1,0 +1,4 @@
+# 合成夹具按字节长度和 SHA-256 验收，不进行检出换行转换。
+internal/engine/testdata/** -text
+# 正文保留了合成时的截断和填充空白，不作为代码格式错误修剪。
+internal/engine/testdata/**/workspace/** whitespace=-blank-at-eol,-blank-at-eof
